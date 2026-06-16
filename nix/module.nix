@@ -6,6 +6,12 @@
 }:
 let
   cfg = config.services.diyhue;
+
+  # diyHue's argumentHandler.py derives the cert serial as
+  # `mac[:6] + "fffe" + mac[-6:]` (mac without colons).
+  rawMac = lib.replaceStrings [ ":" ] [ "" ] cfg.mac;
+  certSerial =
+    (builtins.substring 0 6 rawMac) + "fffe" + (builtins.substring 6 6 rawMac);
 in
 {
   options.services.diyhue = {
@@ -59,6 +65,36 @@ in
       description = "Disable the HTTPS listener entirely.";
     };
 
+    generateCert = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether to (re)generate the MAC-bound self-signed certificate before
+        diyHue starts. When false, diyHue is launched with --no-cert-gen and
+        expects an existing certificate at certPath.
+      '';
+    };
+
+    certPath = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/diyhue/cert.pem";
+      description = ''
+        Path to cert.pem (PEM file containing both the private key and the
+        public certificate, as produced by diyhue-genCert). diyHue reads this
+        for its HTTPS listener and a reverse-proxy can be pointed at the same
+        path.
+      '';
+    };
+
+    certGroup = lib.mkOption {
+      type = lib.types.str;
+      default = "diyhue";
+      description = ''
+        Group that owns the generated cert.pem. Add a reverse proxy's user to
+        this group so it can read the certificate.
+      '';
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -95,11 +131,45 @@ in
       ];
     };
 
+    # Oneshot that primes the cert before diyhue (and any reverse proxy) needs
+    # it. Runs as root with no sandboxing so it can create the cert directory
+    # before diyhue's StateDirectory has materialised. Skipped when
+    # generateCert is false.
+    systemd.services.diyhue-cert = lib.mkIf cfg.generateCert {
+      description = "Generate diyHue MAC-bound TLS certificate";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "diyhue.service" ];
+
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+
+      script = ''
+        set -eu
+        certDir="$(dirname '${cfg.certPath}')"
+        install -d -o diyhue -g ${cfg.certGroup} -m 0750 "$certDir"
+        if [ ! -s '${cfg.certPath}' ]; then
+          ${cfg.package}/bin/diyhue-genCert ${certSerial} "$certDir"
+          # genCert.sh always writes <config-dir>/cert.pem; move into place if
+          # the caller asked for a different filename within the directory.
+          if [ "$certDir/cert.pem" != '${cfg.certPath}' ]; then
+            mv "$certDir/cert.pem" '${cfg.certPath}'
+          fi
+        fi
+        chown diyhue:${cfg.certGroup} '${cfg.certPath}'
+        chmod 0640 '${cfg.certPath}'
+      '';
+    };
+
     systemd.services.diyhue = {
       description = "diyHue Philips Hue Bridge emulator";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" ];
+      after =
+        [ "network-online.target" ]
+        ++ lib.optional cfg.generateCert "diyhue-cert.service";
       wants = [ "network-online.target" ];
+      requires = lib.optional cfg.generateCert "diyhue-cert.service";
 
       serviceConfig = {
         Type = "simple";
@@ -115,6 +185,8 @@ in
             cfg.mac
             "--config_path"
             "/var/lib/diyhue"
+            "--cert-path"
+            cfg.certPath
             "--bind-ip"
             cfg.bindAddress
             "--http-port"
@@ -122,6 +194,7 @@ in
             "--https-port"
             (toString cfg.httpsPort)
           ]
+          ++ lib.optional (!cfg.generateCert) "--no-cert-gen"
           ++ lib.optionals (cfg.advertisedIp != null) [
             "--ip"
             cfg.advertisedIp

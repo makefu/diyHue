@@ -7,9 +7,11 @@
 }:
 let
   # Test framework assigns 192.168.1.<N> based on alphabetical node order.
-  # bridge → .1, hass → .2, proxy → .3
-  proxyIp = "192.168.1.3";
+  # bridge → .1, hass → .2
+  bridgeIp = "192.168.1.1";
   hassIp = "192.168.1.2";
+
+  certPath = "/var/lib/diyhue/cert.pem";
 
   pythonWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
 in
@@ -24,52 +26,50 @@ pkgs.testers.nixosTest {
 
         nixpkgs.overlays = [ (final: prev: { diyhue = diyhuePackage; }) ];
 
+        # diyhue listens only on loopback; nginx terminates TLS using the same
+        # MAC-bound cert and reverse-proxies to it. HTTPS in diyhue is disabled
+        # because only one process serves :443 on this host.
         services.diyhue = {
           enable = true;
           mac = "00:11:22:33:44:55";
-          httpPort = 80;
-          httpsPort = 443;
-          bindAddress = "0.0.0.0";
-          # advertise the proxy so description.xml URLBase tells clients to use nginx
-          advertisedIp = proxyIp;
+          bindAddress = "127.0.0.1";
+          httpPort = 8080;
+          noServeHttps = true;
+          advertisedIp = bridgeIp;
+          openFirewall = false;
+          inherit certPath;
+          # nginx must be able to read the cert.
+          certGroup = "nginx";
         };
 
-        # Don't auto-start: testScript patches config.yaml with the HA token first,
-        # then starts the service manually.
+        # Don't auto-start: testScript primes config.yaml with the HA token first.
         systemd.services.diyhue.wantedBy = lib.mkForce [ ];
 
-        environment.systemPackages = [ pythonWithYaml ];
-
-        networking.firewall.enable = false;
-      };
-
-    proxy =
-      { ... }:
-      {
         services.nginx = {
           enable = true;
           recommendedProxySettings = true;
 
           virtualHosts."_" = {
             default = true;
+            addSSL = true;
+            sslCertificate = certPath;
+            sslCertificateKey = certPath;
+
             locations."/" = {
-              proxyPass = "http://bridge";
+              proxyPass = "http://127.0.0.1:8080";
               extraConfig = ''
                 proxy_buffering off;
               '';
             };
           };
-
-          streamConfig = ''
-            upstream diyhue_https {
-              server bridge:443;
-            }
-            server {
-              listen 443;
-              proxy_pass diyhue_https;
-            }
-          '';
         };
+
+        systemd.services.nginx = {
+          after = [ "diyhue-cert.service" ];
+          requires = [ "diyhue-cert.service" ];
+        };
+
+        environment.systemPackages = [ pythonWithYaml ];
 
         networking.firewall.enable = false;
       };
@@ -84,9 +84,6 @@ pkgs.testers.nixosTest {
             "default_config"
             "input_boolean"
             "template"
-            "hue"
-            "ssdp"
-            "zeroconf"
           ];
           config = {
             homeassistant = {
@@ -103,14 +100,10 @@ pkgs.testers.nixosTest {
             };
             logger.default = "info";
 
-            input_boolean = {
-              test_light = {
-                name = "Test Light";
-              };
-            };
+            input_boolean.test_light.name = "Test Light";
 
-            # Template light backed by input_boolean.test_light so HA can drive on/off
-            # and diyHue's homeassistant_ws integration picks it up as a Hue light.
+            # Template light backed by input_boolean.test_light so HA can drive
+            # on/off and diyHue's homeassistant_ws integration imports it.
             template = [
               {
                 light = [
@@ -153,20 +146,20 @@ pkgs.testers.nixosTest {
 
     start_all()
 
-    # === Wait for nginx + HA. diyhue is intentionally NOT auto-started. ===
-    proxy.wait_for_unit("nginx.service")
-    proxy.wait_for_open_port(80)
-    proxy.wait_for_open_port(443)
+    bridge.wait_for_unit("diyhue-cert.service")
+    bridge.wait_for_unit("nginx.service")
+    bridge.wait_for_open_port(80)
+    bridge.wait_for_open_port(443)
 
     hass.wait_for_unit("home-assistant.service")
     hass.wait_for_open_port(8123)
-    # HA finishes loading components asynchronously; wait for full init.
     hass.wait_until_succeeds(
-        "journalctl -u home-assistant.service --no-pager | grep -q 'Home Assistant initialized in'",
+        "journalctl -u home-assistant.service --no-pager "
+        "| grep -q 'Home Assistant initialized in'",
         timeout=120,
     )
 
-    # === Bootstrap HA: onboard owner user + obtain an access token. ===
+    # === Bootstrap HA: onboard owner + obtain an access token. ===
     onboard = hass.succeed(
         "curl -fsS -X POST http://localhost:8123/api/onboarding/users "
         "-H 'Content-Type: application/json' "
@@ -174,7 +167,6 @@ pkgs.testers.nixosTest {
         "\"username\":\"test\",\"password\":\"test\",\"language\":\"en\"}'"
     )
     auth_code = _json.loads(onboard)["auth_code"]
-    print("HA auth_code obtained")
 
     token_res = hass.succeed(
         "curl -fsS -X POST http://localhost:8123/auth/token "
@@ -182,102 +174,98 @@ pkgs.testers.nixosTest {
         "&client_id=http://hass:8123/'"
     )
     ha_token = _json.loads(token_res)["access_token"]
-    print("HA access_token obtained")
 
-    # Finish the remaining onboarding steps so integrations + frontend settle.
     for step in ("core_config", "analytics"):
         hass.succeed(
             f"curl -fsS -X POST http://localhost:8123/api/onboarding/{step} "
             f"-H 'Authorization: Bearer {ha_token}'"
         )
 
-    # Confirm the template light exists.
     hass.wait_until_succeeds(
         f"curl -fsS -H 'Authorization: Bearer {ha_token}' "
         "http://localhost:8123/api/states/light.diyhue_test | grep -q '\"state\":'"
     )
-    initial_state = hass.succeed(
+    initial_data = _json.loads(hass.succeed(
         f"curl -fsS -H 'Authorization: Bearer {ha_token}' "
         "http://localhost:8123/api/states/light.diyhue_test"
-    )
-    print("HA initial light state:", initial_state)
-    initial_data = _json.loads(initial_state)
-    assert initial_data["state"] == "off", f"Expected off, got: {initial_state}"
+    ))
+    assert initial_data["state"] == "off", f"Expected off, got: {initial_data}"
 
-    # === Start diyhue with HA WS integration pre-configured. ===
-    # First run to materialise the default config.yaml. diyHue only persists when
-    # save_config() is invoked, so we trigger that with a no-op PUT that flips
-    # linkbutton (loopback PUTs bypass the auth check via restful.py:39).
+    # === Bring diyhue up so config.yaml gets materialised, then patch it
+    #     with the HA WS credentials and restart. ===
     bridge.systemctl("start diyhue")
-    bridge.wait_for_open_port(80)
+    bridge.wait_for_open_port(8080)
+    # Trigger save_config() via the loopback link-button PUT.
     bridge.succeed(
         "curl -fsS -X PUT -H 'Content-Type: application/json' "
-        "-d '{\"linkbutton\":true}' http://localhost/api/anybody/config"
+        "-d '{\"linkbutton\":true}' http://localhost:8080/api/anybody/config"
     )
     bridge.wait_until_succeeds("test -f /var/lib/diyhue/config.yaml", timeout=10)
     bridge.systemctl("stop diyhue")
 
-    # Patch config.yaml: enable homeassistant + plug in IP/port/token.
     bridge.succeed(
         "python3 -c \""
         "import yaml; "
         "f=open('/var/lib/diyhue/config.yaml'); c=yaml.safe_load(f); f.close(); "
         "c['homeassistant']={'enabled':True,'homeAssistantIp':'${hassIp}',"
         f"'homeAssistantPort':8123,'homeAssistantToken':'{ha_token}',"
-        "'homeAssistantIncludeByDefault':True,'homeAssistantUseHttps':False}; "
+        "'homeAssistantIncludeByDefault':True}; "
         "f=open('/var/lib/diyhue/config.yaml','w'); yaml.safe_dump(c,f); f.close()\""
     )
 
     bridge.systemctl("start diyhue")
-    bridge.wait_for_open_port(80)
-
-    # Wait for diyHue to authenticate against HA's WS API.
+    bridge.wait_for_open_port(8080)
     bridge.wait_until_succeeds(
         "journalctl -u diyhue --no-pager "
         "| grep -q 'Home Assistant Web Socket Authorisation complete'",
         timeout=60,
     )
 
-    # === Pair hueadm through nginx. ===
+    # === Verify nginx serves diyHue's MAC-bound cert (not nginx's snake-oil). ===
+    cert_subject = hass.succeed(
+        "openssl s_client -connect bridge:443 -servername bridge </dev/null 2>/dev/null "
+        "| openssl x509 -noout -subject"
+    )
+    assert "001122fffe334455" in cert_subject, (
+        f"nginx is not serving the diyHue cert. Got: {cert_subject}"
+    )
+
+    # === Pair hueadm through nginx + drive everything else through it. ===
     bridge.succeed(
         "curl -fsS -X PUT -H 'Content-Type: application/json' "
-        "-d '{\"linkbutton\":true}' http://localhost/api/anybody/config"
+        "-d '{\"linkbutton\":true}' http://localhost:8080/api/anybody/config"
     )
-    pair = hass.succeed("hueadm --host proxy create-user nixos-test -j")
-    pair_data = _extract_json(pair, "[")
-    username = pair_data[0]["success"]["username"]
+    pair = hass.succeed("hueadm --host bridge create-user nixos-test -j")
+    username = _extract_json(pair, "[")[0]["success"]["username"]
     print("paired username:", username)
 
-    # === Trigger light discovery so diyHue imports the HA template light. ===
+    # Sanity-check the HTTPS reverse-proxy path serves the API too.
+    assert '"bridgeid"' in hass.succeed(
+        f"curl -fsSk https://bridge/api/{username}/config"
+    )
+
+    # === Trigger discovery so diyHue imports the HA template light. ===
     hass.succeed(
         f"curl -fsS -X POST -H 'Content-Type: application/json' "
-        f"-d '{{}}' http://proxy/api/{username}/lights"
+        f"-d '{{}}' http://bridge/api/{username}/lights"
     )
-    bridge.wait_until_succeeds(
-        "journalctl -u diyhue --no-pager "
-        "| grep -q 'HomeAssistant_ws: found light'",
-        timeout=120,
-    )
-    # scanForLights runs other protocols (WLED, tasmota...) sequentially after the WS
-    # discovery; new lights are only persisted once the *whole* scan finishes and the
-    # `Add new light` branch fires. Wait for that log line specifically.
     bridge.wait_until_succeeds(
         "journalctl -u diyhue --no-pager | grep -q 'Add new light Diyhue Test'",
         timeout=180,
     )
 
-    # === Verify hueadm sees the imported light + initial OFF state. ===
-    lights = hass.succeed(f"hueadm --host proxy --user {username} lights -j")
-    print("discovered lights via hueadm:", lights)
-    lights_data = _extract_json(lights, "{")
-    assert len(lights_data) >= 1, f"No HA lights discovered: {lights}"
+    # === BEFORE: hueadm reports the light off. ===
+    lights_data = _extract_json(
+        hass.succeed(f"hueadm --host bridge --user {username} lights -j"), "{"
+    )
+    assert lights_data, "No HA lights discovered"
     light_id = next(iter(lights_data))
     print(f"light id {light_id} state BEFORE:", lights_data[light_id]["state"])
     assert lights_data[light_id]["state"]["on"] is False, (
         f"Expected light to be OFF before toggle, got: {lights_data[light_id]['state']}"
     )
 
-    # === Flip the HA template light ON via HA REST. ===
+    # === Flip via HA REST. ===
     hass.succeed(
         f"curl -fsS -X POST -H 'Authorization: Bearer {ha_token}' "
         f"-H 'Content-Type: application/json' "
@@ -285,12 +273,15 @@ pkgs.testers.nixosTest {
         f"http://localhost:8123/api/services/light/turn_on"
     )
 
-    # Wait for the WS state update to propagate into diyHue.
+    # diyHue's stateFetch sync waits for the apiUser last_use_date to update,
+    # which only happens because ProxyFix translates X-Forwarded-For so
+    # request.remote_addr is the hass IP, not the nginx loopback.
     saw_on = False
     last_state = None
-    for _ in range(40):
-        lights = hass.succeed(f"hueadm --host proxy --user {username} lights -j")
-        lights_data = _extract_json(lights, "{")
+    for _ in range(60):
+        lights_data = _extract_json(
+            hass.succeed(f"hueadm --host bridge --user {username} lights -j"), "{"
+        )
         last_state = lights_data[light_id]["state"]
         if last_state.get("on") is True:
             saw_on = True
@@ -300,12 +291,10 @@ pkgs.testers.nixosTest {
     print(f"light id {light_id} state AFTER:", last_state)
     assert saw_on, f"hueadm never observed ON state; last: {last_state}"
 
-    # === Sanity: HA still exposes the light as on. ===
-    final_state = hass.succeed(
+    final_data = _json.loads(hass.succeed(
         f"curl -fsS -H 'Authorization: Bearer {ha_token}' "
         "http://localhost:8123/api/states/light.diyhue_test"
-    )
-    final_data = _json.loads(final_state)
-    assert final_data["state"] == "on", f"HA reports light is not on: {final_state}"
+    ))
+    assert final_data["state"] == "on", f"HA reports light is not on: {final_data}"
   '';
 }
