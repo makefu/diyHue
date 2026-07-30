@@ -162,7 +162,12 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)'
     tmp=$(mktemp -d)
     unzip -q ${diyHueUI} -d "$tmp"
     install -Dm644 "$tmp/dist/index.html" $out/share/diyhue/flaskUI/templates/index.html
-    cp -r "$tmp/dist/assets" $out/share/diyhue/flaskUI/assets
+    # Merge the Vite build's hashed bundles *into* the existing assets dir (which
+    # already ships images/, login.css, ... referenced by index.html and the
+    # login template). Copying the directory itself would nest them at
+    # flaskUI/assets/assets/, so Flask's /assets static route would 404 every
+    # index-*.js / index-*.css and the SPA module load would fail.
+    cp -r "$tmp/dist/assets/." $out/share/diyhue/flaskUI/assets/
 
     install -d $out/bin
     makeWrapper ${pythonEnv}/bin/python3 $out/bin/diyhue \

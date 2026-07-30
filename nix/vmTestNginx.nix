@@ -230,6 +230,62 @@ pkgs.testers.nixosTest {
         f"nginx is not serving the diyHue cert. Got: {cert_subject}"
     )
 
+    # === Web UI: static bundles reachable + full login round-trip. ===
+    # Regression for the packaging bug where the Vite build's hashed bundles
+    # were copied to flaskUI/assets/assets/ instead of being merged into
+    # flaskUI/assets/. Flask's /assets static route then 404'd every
+    # index-*.js, so the browser reported "Loading failed for the module".
+    import re as _re
+
+    def _csrf(page):
+        m = _re.search(r'name="csrf_token"[^>]*value="([^"]+)"', page)
+        assert m, f"no csrf_token in login page: {page[:200]}"
+        return m.group(1)
+
+    asset_ct = hass.succeed(
+        "curl -fsSk -o /dev/null -w '%{content_type}' "
+        "https://bridge/assets/index-BGcdHbbG.js"
+    )
+    assert "javascript" in asset_ct, f"JS bundle not served as JS: {asset_ct!r}"
+    # CSS bundle (also from the Vite build) and an image that ships in the
+    # repo's own assets dir — proves the two trees were merged, not nested.
+    hass.succeed("curl -fsSk -o /dev/null https://bridge/assets/index-CyzsjfeZ.css")
+    hass.succeed("curl -fsSk -o /dev/null https://bridge/assets/images/favicon.ico")
+
+    # The SPA shell at / is login-gated: an unauthenticated GET redirects.
+    root_code = hass.succeed(
+        "curl -sk -o /dev/null -w '%{http_code}' https://bridge/"
+    ).strip()
+    assert root_code == "302", f"unauthenticated / should redirect, got {root_code}"
+
+    # Wrong password is rejected (fresh session/CSRF).
+    bad_page = hass.succeed("curl -fsSk -c /tmp/cj_bad https://bridge/login")
+    bad_csrf = _csrf(bad_page)
+    bad_body = hass.succeed(
+        "curl -fsSk -b /tmp/cj_bad -c /tmp/cj_bad --referer https://bridge/login "
+        f"--data-urlencode 'csrf_token={bad_csrf}' "
+        "--data-urlencode 'email=admin@diyhue.org' "
+        "--data-urlencode 'password=wrong' https://bridge/login"
+    )
+    assert "Bad login" in bad_body, f"bad password not rejected: {bad_body!r}"
+
+    # Correct default credentials log in and land on the SPA shell.
+    login_page = hass.succeed("curl -fsSk -c /tmp/cj https://bridge/login")
+    csrf = _csrf(login_page)
+    login_code = hass.succeed(
+        "curl -sk -b /tmp/cj -c /tmp/cj -o /dev/null -w '%{http_code}' "
+        "--referer https://bridge/login "
+        f"--data-urlencode 'csrf_token={csrf}' "
+        "--data-urlencode 'email=admin@diyhue.org' "
+        "--data-urlencode 'password=changeme' https://bridge/login"
+    ).strip()
+    assert login_code == "302", f"valid login did not redirect (got {login_code})"
+
+    index_html = hass.succeed("curl -fsSk -b /tmp/cj https://bridge/")
+    assert "/assets/index-BGcdHbbG.js" in index_html, (
+        f"authenticated / did not render the SPA shell: {index_html[:200]}"
+    )
+
     # === Pair hueadm through nginx + drive everything else through it. ===
     bridge.succeed(
         "curl -fsS -X PUT -H 'Content-Type: application/json' "
