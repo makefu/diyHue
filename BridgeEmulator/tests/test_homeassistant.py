@@ -137,6 +137,101 @@ class TestDiscoveryStats:
         assert stats["entities_included"] == 1
 
 
+class TestEntityOverrides:
+    """Entities picked by hand on the status page.
+
+    Home Assistant reports no capabilities for a `switch.*` entity, but plenty
+    of them are lamps that happen to only know on and off.
+    """
+
+    def test_every_supported_entity_is_listed_not_only_the_included_ones(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})
+        ha.record_states([payloads.RGB_STRIP_ON, payloads.SWITCH_OFF, payloads.SENSOR])
+
+        listing = {entry["entity_id"]: entry for entry in ha.entities()}
+
+        assert set(listing) == {
+            "light.arbeitszimmer_buttonbox_led_strip",
+            "switch.arbeitszimmer_stecker2",
+        }, "the page cannot offer an entity it was never told about"
+        assert listing["switch.arbeitszimmer_stecker2"]["included"] is False
+        assert listing["switch.arbeitszimmer_stecker2"]["capable"] is False
+        assert listing["switch.arbeitszimmer_stecker2"]["name"] == "Arbeitszimmer Stecker 2"
+
+    def test_an_override_includes_an_entity_the_filter_dropped(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})
+        ha.record_states([payloads.SWITCH_OFF])
+        assert ha.latest_states == {}
+
+        ha.set_override("switch.arbeitszimmer_stecker2", True)
+
+        assert set(ha.latest_states) == {"switch.arbeitszimmer_stecker2"}
+        assert ha.status()["discovery"]["entities_included"] == 1
+
+    def test_an_overridden_entity_without_capabilities_becomes_a_plug(self):
+        ha.configure({"enabled": True})
+        ha.record_states([payloads.SWITCH_OFF])
+        assert ha.model_id_for_entity("switch.arbeitszimmer_stecker2", {}) is None
+
+        ha.set_override("switch.arbeitszimmer_stecker2", True)
+
+        assert ha.model_id_for_entity("switch.arbeitszimmer_stecker2", {}) == "LOM001"
+        # Now that it maps to a model it is a light, not a counted casualty.
+        assert ha.status()["discovery"]["entities_without_capabilities"] == 0
+
+    def test_an_override_excludes_an_entity_the_filter_accepted(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": True})
+        ha.record_states([payloads.RGB_STRIP_ON])
+
+        ha.set_override("light.arbeitszimmer_buttonbox_led_strip", False)
+
+        assert ha.latest_states == {}
+
+    def test_an_override_beats_the_diyhue_attribute(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})
+        ha.record_states([payloads.tagged(payloads.RGB_STRIP_ON, "exclude")])
+
+        ha.set_override("light.arbeitszimmer_buttonbox_led_strip", True)
+
+        assert set(ha.latest_states) == {"light.arbeitszimmer_buttonbox_led_strip"}
+
+    def test_clearing_an_override_hands_the_decision_back_to_the_filter(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": True})
+        ha.record_states([payloads.RGB_STRIP_ON])
+        ha.set_override("light.arbeitszimmer_buttonbox_led_strip", False)
+
+        ha.set_override("light.arbeitszimmer_buttonbox_led_strip", None)
+
+        assert set(ha.latest_states) == {"light.arbeitszimmer_buttonbox_led_strip"}
+        assert ha.overrides() == {}
+
+    def test_overrides_are_read_from_the_config(self):
+        ha.configure({
+            "enabled": True,
+            "homeAssistantEntities": {"switch.arbeitszimmer_stecker2": True},
+        })
+        ha.record_states([payloads.SWITCH_OFF])
+
+        assert set(ha.latest_states) == {"switch.arbeitszimmer_stecker2"}
+
+    def test_an_overridden_switch_is_discovered_as_a_light(self, monkeypatch):
+        """The end of the chain: override in, lamp out."""
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})
+        ha.record_states([payloads.SWITCH_OFF])
+        ha.set_override("switch.arbeitszimmer_stecker2", True)
+        monkeypatch.setattr(ha, "request_states", ha.status)
+
+        detected = []
+        ha.discover(detected)
+
+        assert detected == [{
+            "protocol": "homeassistant_ws",
+            "name": "Arbeitszimmer Stecker 2",
+            "modelid": "LOM001",
+            "protocol_cfg": {"entity_id": "switch.arbeitszimmer_stecker2", "ip": "none"},
+        }]
+
+
 class TestConfiguration:
     def test_minimal_config_does_not_raise(self):
         """An upgraded config.yaml only ever gains {"enabled": False}."""

@@ -17,6 +17,7 @@ from flask_sock import Sock
 
 import configManager
 import logManager
+from flaskUI import restful
 from lights import discover
 from services import homeAssistantWS, serviceManager, statusRegistry
 
@@ -39,6 +40,78 @@ HOME_ASSISTANT_SETTINGS = {
     "homeAssistantIncludeByDefault": bool,
     "homeAssistantUseHttps": bool,
 }
+
+
+def _home_assistant_lights():
+    """Bridge lights created from Home Assistant entities, keyed by entity id."""
+    lights = {}
+    for light_id, light in bridgeConfig["lights"].items():
+        if light.protocol == "homeassistant_ws":
+            lights[light.protocol_cfg.get("entity_id")] = light_id
+    return lights
+
+
+def _entity_listing():
+    """Every entity Home Assistant reported, with the light it maps to."""
+    registered = _home_assistant_lights()
+    listing = homeAssistantWS.entities()
+    for entry in listing:
+        entry["light_id"] = registered.get(entry["entity_id"])
+        entry["exposed"] = entry["light_id"] is not None
+    return listing
+
+
+def _expose_entity(entity_id):
+    """Register an entity as a bridge light, without waiting for a scan."""
+    existing = _home_assistant_lights().get(entity_id)
+    if existing is not None:
+        return existing
+    ha_state = homeAssistantWS.all_states.get(entity_id)
+    if ha_state is None:
+        raise KeyError(entity_id)
+    attributes = ha_state.get("attributes") or {}
+    name = attributes.get("friendly_name", entity_id)
+    # The override is already stored, so an entity Home Assistant reports no
+    # capabilities for maps onto the plug model rather than being skipped.
+    model_id = homeAssistantWS.model_id_for_entity(entity_id, attributes)
+    light_id = discover.addNewLight(model_id, name, "homeassistant_ws",
+                                    {"entity_id": entity_id, "ip": "none"})
+    if not light_id:
+        raise ValueError(f"unknown model id {model_id}")
+    statusRegistry.event("light_found", id=light_id, name=name,
+                         protocol="homeassistant_ws", modelid=model_id)
+    return light_id
+
+
+def _withdraw_entity(entity_id):
+    """Remove the bridge light an entity was exposed as, if there is one."""
+    light_id = _home_assistant_lights().get(entity_id)
+    if light_id is None:
+        return None
+    name = bridgeConfig["lights"][light_id].name
+    del bridgeConfig["lights"][light_id]
+    # Groups hold weak references, so the light drops out of them by itself,
+    # but both files have to be rewritten for the removal to survive a restart.
+    configManager.bridgeConfig.save_config(backup=False, resource="lights")
+    configManager.bridgeConfig.save_config(backup=False, resource="groups")
+    restful.GroupZeroMessage()
+    statusRegistry.event("light_removed", id=light_id, name=name, entity_id=entity_id)
+    return light_id
+
+
+def set_entity_exposure(entity_id, expose):
+    """Expose a Home Assistant entity as a lamp, or stop exposing it.
+
+    The override is written first: it is what makes an entity without
+    capabilities map to a model at all.
+    """
+    homeAssistantWS.set_override(entity_id, expose)
+    section = bridgeConfig["config"].setdefault("homeassistant", {})
+    section["homeAssistantEntities"] = homeAssistantWS.overrides()
+    configManager.bridgeConfig.save_config(backup=False, resource="config")
+    if expose:
+        return _expose_entity(entity_id)
+    return _withdraw_entity(entity_id)
 
 
 def _lights_per_protocol():
@@ -163,6 +236,41 @@ def set_home_assistant():
     configManager.bridgeConfig.save_config(backup=False, resource="config")
     serviceManager.apply(bridgeConfig, changed_keys={"homeassistant"})
     return jsonify(_build_state())
+
+
+@status.route('/api/homeassistant/entities')
+@flask_login.login_required
+def home_assistant_entities():
+    """The full entity list, so entities can be picked instead of guessed at."""
+    if request.args.get('refresh'):
+        try:
+            homeAssistantWS.request_states()
+        except homeAssistantWS.HomeAssistantUnavailable as e:
+            return jsonify({"error": str(e)}), 502
+    return jsonify({"entities": _entity_listing()})
+
+
+@status.route('/api/homeassistant/entities', methods=['POST'])
+@flask_login.login_required
+def set_home_assistant_entity():
+    """Expose or withdraw a single entity.
+
+    Ticking an entity registers it straight away: waiting for a scan is the
+    behaviour that made included entities look lost in the first place.
+    """
+    payload = request.get_json(force=True, silent=True) or {}
+    entity_id = payload.get("entity_id")
+    if not entity_id:
+        return jsonify({"error": "missing 'entity_id'"}), 400
+    if "expose" not in payload:
+        return jsonify({"error": "missing 'expose'"}), 400
+    try:
+        set_entity_exposure(entity_id, bool(payload["expose"]))
+    except KeyError:
+        return jsonify({"error": f"unknown entity {entity_id}"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"entities": _entity_listing(), "state": _build_state()})
 
 
 @status.route('/api/homeassistant/test', methods=['POST'])

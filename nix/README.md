@@ -195,6 +195,9 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
   which is a different number from the entities its include filter accepts.
 - An entity that declares no colour modes is not mapped to a Hue model, and
   the count of those is reported so the drop is visible rather than silent.
+- An entity ticked by hand on the status page overrides the include filter and
+  the `diyhue` attribute, maps onto the plug model even without capabilities,
+  and is registered as a light immediately - unticking removes it again.
 - The status page link is injected into the prebuilt app shell.
 
 `vmTest` (two nodes, ~50s):
@@ -216,6 +219,11 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
   count as `0` registered lights until a scan runs, that the switch is counted
   as unusable rather than silently dropped, and that only the two lights turn
   up in `/api/<user>/lights` afterwards.
+- `/status/api/homeassistant/entities` lists all three, and ticking the
+  capability-less switch registers it as an `LOM001` plug without a scan. The
+  test then drives that light through the Hue API and asserts the stub received
+  a `call_service` in the `switch` domain, that the choice is written to
+  `config.yaml`, and that unticking removes the light again.
 - The authenticated `/` carries the injected link to `/status/`.
 - Integrations are enabled and disabled at runtime; the test asserts
   `ExecMainStartTimestamp` is unchanged, i.e. diyhue never restarted.
@@ -245,6 +253,8 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
   lights.
 - The SPA shell served through nginx carries the injected `/status/` link, and
   the imported HA light is attributed to the `homeassistant` integration.
+- The entity list survives the proxy and points the imported entity at the
+  light id it was registered as.
 
 ## Source patches the package applies
 

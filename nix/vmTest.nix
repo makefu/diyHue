@@ -65,6 +65,10 @@ let
                   # An empty list used to leave discovery blocked for its full
                   # 60 second timeout.
                   reply["result"] = ENTITIES if MODE == "entities" else []
+              if message.get("type") == "call_service":
+                  # Logged so the test can prove a lamp exposed by hand really
+                  # drives its entity, and in the right domain.
+                  print("CALL_SERVICE " + json.dumps(message), flush=True)
               await websocket.send(json.dumps(reply))
 
 
@@ -213,8 +217,11 @@ pkgs.testers.nixosTest {
         ).strip()
         assert code == "302", f"login did not redirect: {code}"
 
+    def _get(path):
+        return _json.loads(bridge.succeed(f"curl -fsS -b /tmp/cj http://localhost{path}"))
+
     def _state():
-        return _json.loads(bridge.succeed("curl -fsS -b /tmp/cj http://localhost/status/api/state"))
+        return _get("/status/api/state")
 
     def _post(path, body="{}"):
         return _json.loads(bridge.succeed(
@@ -246,7 +253,9 @@ pkgs.testers.nixosTest {
     # Its assets ship in this repository rather than the diyHueUI release zip.
     bridge.succeed("curl -fsS -o /dev/null http://localhost/assets/status.js")
     bridge.succeed("curl -fsS -o /dev/null http://localhost/assets/status.css")
-    assert "/assets/status.js" in bridge.succeed("curl -fsS -b /tmp/cj http://localhost/status/")
+    page = bridge.succeed("curl -fsS -b /tmp/cj http://localhost/status/")
+    assert "/assets/status.js" in page
+    assert 'id="entity-list"' in page, "the page must offer the entity list"
 
     state = _state()
     assert set(state["services"]) == {"homeassistant", "mqtt", "deconz"}, state["services"]
@@ -356,6 +365,54 @@ pkgs.testers.nixosTest {
         f"the app's light list must show the registered entities: {sorted(names)}")
     assert "Stub autoplay" not in names, (
         f"a switch with no capabilities must not become a light: {sorted(names)}")
+
+    # === An entity without capabilities can still be exposed by hand ===
+    # Plenty of real lamps hang off a switch: no brightness, no colour, but a
+    # lamp all the same. The entity list is how the user says so.
+    listing = {entry["entity_id"]: entry
+               for entry in _get("/status/api/homeassistant/entities")["entities"]}
+    assert set(listing) == {"light.stub_strip", "light.stub_plug", "switch.stub_autoplay"}, (
+        f"the list must offer every entity, not only the usable ones: {sorted(listing)}")
+    assert listing["switch.stub_autoplay"]["capable"] is False, listing["switch.stub_autoplay"]
+    assert listing["switch.stub_autoplay"]["exposed"] is False, listing["switch.stub_autoplay"]
+    assert listing["light.stub_strip"]["exposed"] is True, (
+        f"a scanned entity must be reported as exposed: {listing['light.stub_strip']}")
+
+    result = _post("/status/api/homeassistant/entities",
+                   '{"entity_id":"switch.stub_autoplay","expose":true}')
+    exposed = {entry["entity_id"]: entry for entry in result["entities"]}["switch.stub_autoplay"]
+    assert exposed["exposed"] is True and exposed["modelid"] == "LOM001", exposed
+    assert result["state"]["protocols"]["homeassistant"]["lights"] == 3, (
+        f"ticking an entity must register it without a scan: {result['state']['protocols']}")
+
+    lights = _json.loads(bridge.succeed(
+        f"curl -fsS http://localhost/api/{username}/lights"))
+    autoplay = [light_id for light_id, light in lights.items()
+                if light["name"] == "Stub autoplay"]
+    assert autoplay, f"the exposed entity must appear in the light list: {lights}"
+
+    # And it has to actually drive the entity, in the switch domain.
+    bridge.succeed(
+        f"curl -fsS -X PUT -H 'Content-Type: application/json' -d '{{\"on\":true}}' "
+        f"http://localhost/api/{username}/lights/{autoplay[0]}/state"
+    )
+    call = bridge.wait_until_succeeds(
+        "journalctl -u stub-ha-entities --no-pager | grep CALL_SERVICE", timeout=30)
+    assert '"domain": "switch"' in call and '"service": "turn_on"' in call, call
+    assert "switch.stub_autoplay" in call, call
+
+    # The choice survives a restart, so a later scan cannot undo it.
+    stored = bridge.succeed("grep -A2 homeAssistantEntities /var/lib/diyhue/config.yaml")
+    assert "switch.stub_autoplay: true" in stored, stored
+
+    # Unticking takes the light away again.
+    result = _post("/status/api/homeassistant/entities",
+                   '{"entity_id":"switch.stub_autoplay","expose":false}')
+    assert result["state"]["protocols"]["homeassistant"]["lights"] == 2, (
+        f"unticking must remove the light: {result['state']['protocols']}")
+    lights = _json.loads(bridge.succeed(
+        f"curl -fsS http://localhost/api/{username}/lights"))
+    assert "Stub autoplay" not in {light["name"] for light in lights.values()}, lights
 
     bridge.succeed("systemctl stop stub-ha-entities")
 

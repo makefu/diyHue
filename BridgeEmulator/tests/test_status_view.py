@@ -12,7 +12,8 @@ import configManager
 from flaskUI.core import views as core_views
 from flaskUI.status import views
 from lights import discover
-from services import statusRegistry
+from services import homeAssistantWS, statusRegistry
+from tests import payloads
 
 
 bridgeConfig = configManager.bridgeConfig.yaml_config
@@ -67,6 +68,65 @@ class TestRegisteredLightCounts:
     def test_a_scan_is_reported_as_never_having_run(self):
         state = views._build_state()
         assert state["scan"].get("lastscan") is None
+
+
+class TestEntityExposure:
+    """Ticking an entity on the status page has to produce a lamp there and then.
+
+    Making the user run a scan afterwards is what made included entities look
+    lost, and a switch has no capabilities to infer a model from at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def home_assistant(self):
+        homeAssistantWS.reset_for_tests()
+        homeAssistantWS.configure({"enabled": True})
+        homeAssistantWS.record_states([payloads.SWITCH_OFF, payloads.RGB_STRIP_ON])
+        yield
+        homeAssistantWS.reset_for_tests()
+        bridgeConfig["config"].get("homeassistant", {}).pop("homeAssistantEntities", None)
+
+    def test_an_entity_without_capabilities_can_be_exposed_as_a_plug(self):
+        light_id = views.set_entity_exposure("switch.arbeitszimmer_stecker2", True)
+
+        light = bridgeConfig["lights"][light_id]
+        assert light.modelid == "LOM001"
+        assert light.name == "Arbeitszimmer Stecker 2"
+        assert light.protocol_cfg["entity_id"] == "switch.arbeitszimmer_stecker2"
+
+    def test_the_choice_is_persisted_in_the_config(self):
+        views.set_entity_exposure("switch.arbeitszimmer_stecker2", True)
+
+        stored = bridgeConfig["config"]["homeassistant"]["homeAssistantEntities"]
+        assert stored == {"switch.arbeitszimmer_stecker2": True}
+
+    def test_the_listing_reports_which_entities_are_exposed(self):
+        views.set_entity_exposure("switch.arbeitszimmer_stecker2", True)
+
+        listing = {entry["entity_id"]: entry for entry in views._entity_listing()}
+
+        assert listing["switch.arbeitszimmer_stecker2"]["exposed"] is True
+        assert listing["light.arbeitszimmer_buttonbox_led_strip"]["exposed"] is False
+
+    def test_exposing_twice_does_not_create_a_second_light(self):
+        first = views.set_entity_exposure("switch.arbeitszimmer_stecker2", True)
+        again = views.set_entity_exposure("switch.arbeitszimmer_stecker2", True)
+
+        assert first == again
+        assert len(views._home_assistant_lights()) == 1
+
+    def test_unticking_removes_the_light_again(self):
+        light_id = views.set_entity_exposure("switch.arbeitszimmer_stecker2", True)
+
+        views.set_entity_exposure("switch.arbeitszimmer_stecker2", False)
+
+        assert light_id not in bridgeConfig["lights"]
+        assert bridgeConfig["config"]["homeassistant"]["homeAssistantEntities"] == {
+            "switch.arbeitszimmer_stecker2": False}
+
+    def test_an_unknown_entity_is_rejected(self):
+        with pytest.raises(KeyError):
+            views.set_entity_exposure("switch.not_reported_by_home_assistant", True)
 
 
 class TestStatusLinkInjection:

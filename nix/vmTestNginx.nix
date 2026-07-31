@@ -502,5 +502,17 @@ pkgs.testers.nixosTest {
     assert state["protocols"]["homeassistant"]["lights"] > 0, (
         f"lights imported from Home Assistant must be counted: {state['protocols']}")
     assert state["protocols"]["wled"]["lights"] == 0, state["protocols"]["wled"]
+
+    # The entity list is how an entity that reports no capabilities is turned
+    # into a lamp, so it has to survive the proxy intact.
+    listing = _json.loads(hass.succeed(
+        "curl -fsSk -b /tmp/cj https://bridge/status/api/homeassistant/entities"
+    ))["entities"]
+    template = [entry for entry in listing if entry["name"] == "Diyhue Test"]
+    assert template, f"the imported light must be listed: {listing}"
+    assert template[0]["exposed"] is True, (
+        f"an entity a scan already registered must be reported as exposed: {template[0]}")
+    assert template[0]["light_id"] == light_id, (
+        f"the list must point at the light it created: {template[0]}")
   '';
 }

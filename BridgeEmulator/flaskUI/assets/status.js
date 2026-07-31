@@ -11,11 +11,25 @@ const TOAST_TIMEOUT_MS = 6000;
 const el = (id) => document.getElementById(id);
 const linkState = el('link-state');
 
+// What a Hue model id means, for the entity list. The bridge picks the model
+// from the capabilities Home Assistant reports.
+const MODEL_LABELS = {
+  LCT015: 'colour',
+  LTW001: 'colour temperature',
+  LWB010: 'dimmable',
+  LOM001: 'on/off',
+};
+
 let state = null;
 let socket = null;
 let pollTimer = null;
 let refreshInFlight = false;
 let logLevel = 'INFO';
+let entities = [];
+let entitiesLoaded = false;
+let entityLoadInFlight = false;
+let entityError = null;
+let entityFilter = '';
 
 async function api(path, options) {
   const response = await fetch(path, {
@@ -230,7 +244,8 @@ function renderHomeAssistant() {
     diagnosis.className = 'diagnosis';
     diagnosis.textContent =
       `All ${discovery.entities_included} included entities report no light `
-      + 'capabilities, so none of them can be exposed as a lamp. Skipped: '
+      + 'capabilities, so none of them became a lamp on their own. Tick the ones '
+      + 'that really are lamps in the entity list below. Skipped: '
       + `${(discovery.without_capabilities_sample || []).join(', ')}`;
   } else if (ha.enabled && usable > 0 && registered === 0) {
     // Passing the include filter only makes an entity a candidate. Nothing
@@ -251,8 +266,123 @@ function renderHomeAssistant() {
     diagnosis.textContent =
       `${incapable} included entities report no light capabilities and are not `
       + 'exposed as lamps - switches and helpers have no brightness or colour. '
-      + `For example: ${(discovery.without_capabilities_sample || []).join(', ')}`;
+      + 'Tick the ones that are lamps in the entity list below to expose them as '
+      + `on/off plugs. For example: ${(discovery.without_capabilities_sample || []).join(', ')}`;
   }
+}
+
+// --- Home Assistant entities ------------------------------------------------
+
+async function loadEntities(refresh) {
+  if (entityLoadInFlight) return;
+  entityLoadInFlight = true;
+  const button = el('entity-refresh');
+  button.disabled = true;
+  try {
+    const result = await api(`/status/api/homeassistant/entities${refresh ? '?refresh=1' : ''}`);
+    entities = result.entities || [];
+    entityError = null;
+  } catch (error) {
+    // An attempt counts as loaded: retrying from every render would hammer a
+    // bridge that cannot reach Home Assistant.
+    entityError = error.message;
+    if (refresh) toast('Could not read the entity list', error.message, 'error');
+  } finally {
+    entitiesLoaded = true;
+    entityLoadInFlight = false;
+    button.disabled = false;
+    renderEntities();
+  }
+}
+
+function capabilityLabel(entity) {
+  if (entity.capable) return MODEL_LABELS[entity.modelid] || entity.modelid;
+  // Nothing to infer a model from; exposing it anyway makes it an on/off plug.
+  return entity.exposed ? 'on/off (no capabilities reported)' : 'no capabilities reported';
+}
+
+async function setEntityExposure(entity, expose) {
+  const result = await api('/status/api/homeassistant/entities', {
+    method: 'POST',
+    body: JSON.stringify({ entity_id: entity.entity_id, expose }),
+  });
+  entities = result.entities || entities;
+  state = result.state || state;
+  renderEntities();
+  render();
+}
+
+function entityRow(entity) {
+  const row = document.createElement('label');
+  row.className = 'entity';
+
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.checked = Boolean(entity.exposed);
+  toggle.addEventListener('change', async () => {
+    toggle.disabled = true;
+    const expose = toggle.checked;
+    try {
+      await setEntityExposure(entity, expose);
+      toast(expose ? 'Exposed as a lamp' : 'Removed from the bridge',
+            entity.name, expose ? 'success' : '');
+    } catch (error) {
+      toggle.checked = !expose;
+      toast('Could not update the entity', error.message, 'error');
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+  row.appendChild(toggle);
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = entity.name;
+  row.appendChild(name);
+
+  const id = document.createElement('span');
+  id.className = 'id';
+  id.textContent = entity.entity_id;
+  row.appendChild(id);
+
+  const caps = document.createElement('span');
+  caps.className = entity.capable ? 'caps' : 'caps weak';
+  caps.textContent = capabilityLabel(entity);
+  caps.title = (entity.supported_color_modes || []).join(', ') || 'no supported_color_modes';
+  row.appendChild(caps);
+
+  const value = document.createElement('span');
+  value.className = 'value';
+  value.textContent = entity.state ?? '';
+  row.appendChild(value);
+  return row;
+}
+
+// Rendered only when the list itself changes - rebuilding a few hundred rows
+// on every status event would throw away the scroll position mid-scroll.
+function renderEntities() {
+  const needle = entityFilter.trim().toLowerCase();
+  const shown = entities.filter((entity) => !needle
+    || entity.entity_id.toLowerCase().includes(needle)
+    || (entity.name || '').toLowerCase().includes(needle));
+
+  const exposed = entities.filter((entity) => entity.exposed).length;
+  const summary = el('entity-summary');
+  if (!entitiesLoaded) {
+    summary.textContent = 'Loading…';
+  } else if (entityError) {
+    summary.textContent = `Could not read the entity list: ${entityError}`;
+  } else if (!entities.length) {
+    summary.textContent = 'Home Assistant has not reported any lights or switches yet. '
+      + 'Connect it above, then reload.';
+  } else {
+    summary.textContent = `${entities.length} entities · ${exposed} exposed as lamps`
+      + (needle ? ` · ${shown.length} match the filter` : '');
+  }
+
+  const list = el('entity-list');
+  list.textContent = '';
+  shown.forEach((entity) => list.appendChild(entityRow(entity)));
 }
 
 function integrationCard(name, entry) {
@@ -345,6 +475,11 @@ function render() {
   renderHomeAssistant();
   renderIntegrations();
   renderLog();
+  // The entity list is fetched separately: it is far larger than the rest of
+  // the state and does not belong in every poll.
+  const haEnabled = Boolean((state.homeassistant || {}).enabled);
+  el('ha-entities-panel').classList.toggle('hidden', !haEnabled);
+  if (haEnabled && !entitiesLoaded) loadEntities(false);
 }
 
 function fillHomeAssistantForm() {
@@ -404,6 +539,8 @@ function applyEvent(event) {
     case 'scan_finished':
       toast('Scan finished', `${event.found} new light${event.found === 1 ? '' : 's'}`,
             event.found ? 'success' : '');
+      // A scan changes which entities are registered as lights.
+      if (entitiesLoaded) loadEntities(false);
       break;
     case 'scan_progress':
       if (state && state.scan) {
@@ -475,6 +612,8 @@ el('ha-form').addEventListener('submit', async (event) => {
       body: JSON.stringify(payload),
     });
     form.homeAssistantToken.value = '';
+    // A different host or filter means a different entity list.
+    entitiesLoaded = false;
     render();
     toast('Home Assistant settings saved', 'Reconnecting…', 'success');
   } catch (error) {
@@ -496,11 +635,19 @@ el('ha-test').addEventListener('click', async () => {
       toast('Home Assistant unreachable', result.error, 'error');
     }
     await refresh();
+    if (result.ok) await loadEntities(false);
   } catch (error) {
     toast('Test failed', error.message, 'error');
   } finally {
     button.disabled = false;
   }
+});
+
+el('entity-refresh').addEventListener('click', () => loadEntities(true));
+
+el('entity-filter').addEventListener('input', (event) => {
+  entityFilter = event.target.value;
+  renderEntities();
 });
 
 el('log-debug').addEventListener('change', (event) => {

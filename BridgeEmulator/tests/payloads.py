@@ -72,6 +72,18 @@ UNAVAILABLE = {
     },
 }
 
+# switch.arbeitszimmer_stecker2 - a wall plug. Home Assistant reports no colour
+# modes at all for switch entities, so nothing infers that this is a lamp; only
+# the user can say so.
+SWITCH_OFF = {
+    "entity_id": "switch.arbeitszimmer_stecker2",
+    "state": "off",
+    "attributes": {
+        "friendly_name": "Arbeitszimmer Stecker 2",
+        "device_class": "outlet",
+    },
+}
+
 # Not a light or switch - must never be considered for discovery.
 SENSOR = {
     "entity_id": "sensor.arbeitszimmer_temperature",

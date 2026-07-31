@@ -56,6 +56,25 @@
         </form>
       </section>
 
+      <section class="panel hidden" id="ha-entities-panel">
+        <div class="panel-head">
+          <h2>Home Assistant entities</h2>
+          <input id="entity-filter" class="filter" type="search"
+                 placeholder="Filter by name or entity id" autocomplete="off">
+          <button type="button" id="entity-refresh" class="button ghost">
+            <i class="fas fa-sync"></i> Reload from Home Assistant
+          </button>
+        </div>
+        <p class="muted">
+          Everything Home Assistant reports, whether the include filter accepts
+          it or not. Tick an entity to expose it as a lamp right away - useful
+          for switches and plugs, which report no brightness or colour but can
+          still be turned on and off.
+        </p>
+        <p id="entity-summary" class="muted"></p>
+        <div id="entity-list" class="entity-list"></div>
+      </section>
+
       <section class="panel" id="integrations-panel">
         <div class="panel-head"><h2>Integrations</h2></div>
         <p class="muted">

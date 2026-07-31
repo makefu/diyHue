@@ -39,6 +39,12 @@ COLOUR_MODES = (HS, XY, RGB, RGBW, RGBWW)
 
 SUPPORTED_DOMAINS = ("light.", "switch.")
 
+# Model used for an entity the user exposed by hand although Home Assistant
+# reports no capabilities for it. A Hue plug is on/off and nothing else, which
+# is exactly what a `switch.*` entity - or a light behind an integration that
+# only knows on and off - can do.
+FORCED_MODEL_ID = "LOM001"
+
 # How many rejected entity ids to keep for the status page, so the user can see
 # concrete examples of what the include filter dropped.
 EXCLUDED_SAMPLE_SIZE = 5
@@ -65,6 +71,17 @@ EXCLUDED_SAMPLE_SIZE = 5
 # }
 latest_states = {}
 
+# Every entity in a supported domain, whether the include filter accepts it or
+# not. `latest_states` is the filtered view the light protocol reads; this one
+# backs the entity list on the status page, so a user can tick an entity the
+# filter would have dropped.
+all_states = {}
+
+# entity_id -> bool, set from the status page and persisted in config.yaml as
+# `homeassistant.homeAssistantEntities`. An entry overrules both the
+# include-by-default flag and the `diyhue` attribute.
+entity_overrides = {}
+
 _state_lock = threading.Lock()
 _supervisor = None
 _running = False
@@ -86,6 +103,7 @@ def _blank_status():
             "entities_included": 0,
             "entities_tagged": 0,
             "entities_without_capabilities": 0,
+            "entities_overridden": 0,
             "excluded_sample": [],
             "without_capabilities_sample": [],
             "last_discovery": None,
@@ -142,6 +160,8 @@ def reset_for_tests():
     include_by_default = False
     _running = False
     latest_states.clear()
+    all_states.clear()
+    entity_overrides.clear()
     discovery_result.clear()
     with _state_lock:
         _status = _blank_status()
@@ -171,6 +191,20 @@ def model_id_for(supported_colour_modes):
     return None
 
 
+def model_id_for_entity(entity_id, attributes):
+    """Model id for one entity, honouring an explicit override.
+
+    Home Assistant reports no colour modes at all for `switch.*` entities, and
+    a few real lamps sit behind integrations that only expose on and off. Those
+    are lights if the user says so, so an entity that was ticked by hand falls
+    back to the plug model instead of being skipped.
+    """
+    model_id = model_id_for((attributes or {}).get("supported_color_modes"))
+    if model_id is None and entity_overrides.get(entity_id):
+        return FORCED_MODEL_ID
+    return model_id
+
+
 def _is_supported_entity(ha_state):
     entity_id = (ha_state or {}).get("entity_id")
     return isinstance(entity_id, str) and entity_id.startswith(SUPPORTED_DOMAINS)
@@ -180,17 +214,25 @@ def _diyhue_flag(ha_state):
     return (ha_state or {}).get("attributes", {}).get("diyhue")
 
 
-def _should_include(ha_state, include_by_default=None):
+def _should_include(ha_state, include_by_default=None, overrides=None):
     """Whether an entity should be exposed as a Hue light.
 
     Without ``homeAssistantIncludeByDefault`` an entity has to opt in by
     carrying a ``diyhue: include`` attribute - which is why a stock Home
     Assistant yields exactly zero lights.
+
+    An override ticked on the status page wins over both: it is the one place
+    the decision is made by the person running the bridge rather than inferred.
     """
     if include_by_default is None:
         include_by_default = globals()["include_by_default"]
+    if overrides is None:
+        overrides = entity_overrides
     if not _is_supported_entity(ha_state):
         return False
+    override = overrides.get(ha_state["entity_id"])
+    if override is not None:
+        return override
     flag = _diyhue_flag(ha_state)
     if include_by_default:
         return flag != "exclude"
@@ -202,48 +244,102 @@ def record_states(ha_states):
 
     The counts are what the status page uses to explain an empty discovery.
     """
-    seen = 0
+    all_states.clear()
+    for ha_state in ha_states or []:
+        if _is_supported_entity(ha_state):
+            all_states[ha_state["entity_id"]] = ha_state
+    return _recompute_included()
+
+
+def _recompute_included():
+    """Re-apply the include filter to the cached entities and report the counts.
+
+    Toggling an entity on the status page changes which entities are lights;
+    doing it here means the change takes effect without asking Home Assistant
+    for the whole state list again.
+    """
     tagged = 0
     excluded = []
     incapable = []
     incapable_count = 0
     included = {}
-    for ha_state in ha_states or []:
-        if not _is_supported_entity(ha_state):
-            continue
-        seen += 1
+    for entity_id, ha_state in all_states.items():
         if _diyhue_flag(ha_state) is not None:
             tagged += 1
         if _should_include(ha_state):
-            included[ha_state["entity_id"]] = ha_state
+            included[entity_id] = ha_state
             # Included, but nothing a Hue client could drive. Counted here so
             # the difference between "included" and "usable as a light" is
             # visible without having to run a scan and compare the totals.
-            if model_id_for(ha_state.get("attributes", {}).get("supported_color_modes")) is None:
+            if model_id_for_entity(entity_id, ha_state.get("attributes")) is None:
                 incapable_count += 1
                 if len(incapable) < EXCLUDED_SAMPLE_SIZE:
-                    incapable.append(ha_state["entity_id"])
+                    incapable.append(entity_id)
         elif len(excluded) < EXCLUDED_SAMPLE_SIZE:
-            excluded.append(ha_state["entity_id"])
+            excluded.append(entity_id)
 
     latest_states.clear()
     latest_states.update(included)
     for entity_id in included:
         logging.info(f"Found {entity_id}")
     logging.info("Home Assistant states: %s supported entities, %s included, %s tagged, "
-                 "%s without light capabilities",
-                 seen, len(included), tagged, incapable_count)
+                 "%s without light capabilities, %s exposed by hand",
+                 len(all_states), len(included), tagged, incapable_count,
+                 sum(1 for value in entity_overrides.values() if value))
     _set_discovery_status(
         include_by_default=include_by_default,
-        entities_seen=seen,
+        entities_seen=len(all_states),
         entities_included=len(included),
         entities_tagged=tagged,
         entities_without_capabilities=incapable_count,
+        entities_overridden=len(entity_overrides),
         excluded_sample=excluded,
         without_capabilities_sample=incapable,
         last_discovery=_now(),
     )
     return len(included)
+
+
+def entities():
+    """Every supported entity Home Assistant reported, for the status page.
+
+    Includes the ones the filter dropped: picking an entity out of that list is
+    the whole point of showing it.
+    """
+    listing = []
+    for entity_id, ha_state in sorted(all_states.items()):
+        attributes = ha_state.get("attributes") or {}
+        modes = list(attributes.get("supported_color_modes") or [])
+        listing.append({
+            "entity_id": entity_id,
+            "name": attributes.get("friendly_name", entity_id),
+            "state": ha_state.get("state"),
+            "supported_color_modes": modes,
+            "modelid": model_id_for_entity(entity_id, attributes),
+            "capable": model_id_for(modes) is not None,
+            "included": _should_include(ha_state),
+            "override": entity_overrides.get(entity_id),
+            "tag": _diyhue_flag(ha_state),
+        })
+    return listing
+
+
+def set_override(entity_id, include):
+    """Force an entity into or out of the light list.
+
+    ``include=None`` hands the decision back to the include filter.
+    """
+    if include is None:
+        entity_overrides.pop(entity_id, None)
+    else:
+        entity_overrides[entity_id] = bool(include)
+    _recompute_included()
+    return overrides()
+
+
+def overrides():
+    """The overrides as they should be written to config.yaml."""
+    return dict(entity_overrides)
 
 
 def handle_result_message(message, message_type):
@@ -407,6 +503,11 @@ class HomeAssistantClient(WebSocketClient):
         try:
             entity_id = message['event']['data']['entity_id']
             new_state = message['event']['data']['new_state']
+            if _is_supported_entity(new_state):
+                # Keep the entity list on the status page current even for the
+                # entities the filter drops - they are exactly the ones the
+                # user is there to pick from.
+                all_states[entity_id] = new_state
             if _should_include(new_state):
                 logging.debug("State update recevied for {}, new state {}".format(
                     entity_id, new_state))
@@ -478,6 +579,10 @@ def configure(ha_config):
     include_by_default = bool(ha_config.get('homeAssistantIncludeByDefault', False))
     use_https = bool(ha_config.get('homeAssistantUseHttps', False))
 
+    entity_overrides.clear()
+    for entity_id, include in (ha_config.get('homeAssistantEntities') or {}).items():
+        entity_overrides[entity_id] = bool(include)
+
     ws_prefix = "wss" if use_https else "ws"
     homeassistant_url = f'{ws_prefix}://{homeassistant_ip}:{homeassistant_port}/api/websocket'
 
@@ -546,6 +651,7 @@ def stop(keep_config=False):
         except Exception:
             logging.debug("Error closing Home Assistant websocket", exc_info=True)
     latest_states.clear()
+    all_states.clear()
     _set_status(connected=False, authenticated=False,
                 enabled=status()["enabled"] if keep_config else False)
 
@@ -585,7 +691,7 @@ def discover(detectedLights):
         attributes = ha_state.get("attributes", {})
         lightName = attributes.get("friendly_name", entity_id)
 
-        model_id = model_id_for(attributes.get('supported_color_modes', []))
+        model_id = model_id_for_entity(entity_id, attributes)
         if model_id is None:
             logging.info("%s has no light capabilities (%s), skipping",
                          entity_id, attributes.get('supported_color_modes'))
