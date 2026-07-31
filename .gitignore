@@ -29,3 +29,6 @@ BridgeEmulator/cert.pem
 *.css
 *.webp
 BridgeEmulator/flaskUI/templates/index.html
+# The status page is part of this repository rather than the diyHueUI bundle.
+!BridgeEmulator/flaskUI/assets/status.js
+!BridgeEmulator/flaskUI/assets/status.css

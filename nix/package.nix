@@ -29,6 +29,7 @@ let
       pyyaml
       zeroconf
       flask-cors
+      flask-sock
       yeelight
       python-kasa
       bleak

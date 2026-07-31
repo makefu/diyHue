@@ -13,6 +13,7 @@ WTForms
 pyyaml
 zeroconf==0.38.3
 flask_cors
+flask-sock
 yeelight
 python-kasa==0.4.1
 bleak

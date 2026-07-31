@@ -81,12 +81,17 @@ api.add_resource(ClipV2ResourceId, '/clip/v2/resource/<string:resource>/<string:
 from flaskUI.core.views import core
 from flaskUI.devices.views import devices
 from flaskUI.error_pages.handlers import error_pages
+from flaskUI.status.views import status as statusPage, sock
 from services.eventStreamer import stream
 
 app.register_blueprint(core)
 app.register_blueprint(devices)
 app.register_blueprint(error_pages)
+app.register_blueprint(statusPage)
 app.register_blueprint(stream)
+# The status page's websocket route lives on the status blueprint, so this only
+# wires up flask-sock's server options.
+sock.init_app(app)
 
 def runHttps(BIND_IP, HOST_HTTPS_PORT, CONFIG_PATH):
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
