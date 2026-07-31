@@ -14,6 +14,75 @@ let
   certPath = "/var/lib/diyhue/cert.pem";
 
   pythonWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+
+  # Drives the status page's websocket the way a browser would: through nginx,
+  # over TLS, authenticated with the session cookie curl already obtained.
+  statusWatcher = pkgs.writers.writePython3Bin "status-watcher"
+    { libraries = [ pkgs.python3Packages.websocket-client ]; flakeIgnore = [ "E501" ]; }
+    ''
+      import json
+      import ssl
+      import sys
+      import threading
+      import urllib.request
+
+      import websocket
+
+      COOKIE_JAR = sys.argv[1]
+      HOST = sys.argv[2]
+
+
+      def cookie_header(path):
+          parts = []
+          with open(path) as handle:
+              for line in handle:
+                  line = line.rstrip("\n")
+                  if line.startswith("#HttpOnly_"):
+                      line = line[len("#HttpOnly_"):]
+                  if not line.strip() or line.startswith("#"):
+                      continue
+                  fields = line.split("\t")
+                  if len(fields) >= 7:
+                      parts.append(f"{fields[5]}={fields[6]}")
+          return "; ".join(parts)
+
+
+      cookie = cookie_header(COOKIE_JAR)
+      context = ssl._create_unverified_context()
+
+      connection = websocket.create_connection(
+          f"wss://{HOST}/status/ws",
+          header=[f"Cookie: {cookie}"],
+          sslopt={"cert_reqs": ssl.CERT_NONE},
+          timeout=120,
+      )
+
+      first = json.loads(connection.recv())
+      assert first["kind"] == "snapshot", first
+      print("SNAPSHOT services:", ",".join(sorted(first["state"]["services"])))
+
+
+      def trigger():
+          request = urllib.request.Request(
+              f"https://{HOST}/status/api/scan", data=b"{}",
+              headers={"Cookie": cookie, "Content-Type": "application/json"})
+          urllib.request.urlopen(request, context=context).read()
+
+
+      threading.Timer(1.0, trigger).start()
+
+      kinds = set()
+      while True:
+          event = json.loads(connection.recv())
+          kinds.add(event["kind"])
+          if event["kind"] == "light_found":
+              print("LIGHT_FOUND:", event["name"])
+          if event["kind"] == "scan_finished":
+              break
+
+      connection.close()
+      print("KINDS:", ",".join(sorted(kinds)))
+    '';
 in
 pkgs.testers.nixosTest {
   name = "diyhue-nginx";
@@ -59,6 +128,21 @@ pkgs.testers.nixosTest {
               proxyPass = "http://127.0.0.1:8080";
               extraConfig = ''
                 proxy_buffering off;
+              '';
+            };
+
+            # The status page's live update channel. proxyWebsockets is what
+            # forwards the Upgrade/Connection headers - without them Werkzeug
+            # does not recognise the request as a websocket and Flask answers
+            # 400. The timeouts stop nginx treating a socket that is idle
+            # between events as a dead upstream.
+            locations."/status/ws" = {
+              proxyPass = "http://127.0.0.1:8080";
+              proxyWebsockets = true;
+              extraConfig = ''
+                proxy_buffering off;
+                proxy_read_timeout 3600s;
+                proxy_send_timeout 3600s;
               '';
             };
           };
@@ -130,6 +214,7 @@ pkgs.testers.nixosTest {
           curl
           openssl
           hueadm
+          statusWatcher
         ];
 
         networking.firewall.enable = false;
@@ -286,6 +371,14 @@ pkgs.testers.nixosTest {
         f"authenticated / did not render the SPA shell: {index_html[:200]}"
     )
 
+    # The status page is served by diyHue itself, not by the release bundle.
+    status_html = hass.succeed("curl -fsSk -b /tmp/cj https://bridge/status/")
+    assert "/assets/status.js" in status_html, (
+        f"status page did not render: {status_html[:200]}"
+    )
+    hass.succeed("curl -fsSk -o /dev/null https://bridge/assets/status.js")
+    hass.succeed("curl -fsSk -o /dev/null https://bridge/assets/status.css")
+
     # === Pair hueadm through nginx + drive everything else through it. ===
     bridge.succeed(
         "curl -fsS -X PUT -H 'Content-Type: application/json' "
@@ -352,5 +445,49 @@ pkgs.testers.nixosTest {
         "http://localhost:8123/api/states/light.diyhue_test"
     ))
     assert final_data["state"] == "on", f"HA reports light is not on: {final_data}"
+
+    # === Status websocket, end to end through nginx. ===
+    # Proves the /status/ws proxy location upgrades the connection and that
+    # discovery events reach a browser live.
+    watcher = hass.succeed("status-watcher /tmp/cj bridge")
+    print("watcher output:", watcher)
+    assert "SNAPSHOT services:" in watcher, watcher
+    kinds = next(line for line in watcher.splitlines() if line.startswith("KINDS:"))
+    for expected in ("scan_started", "protocol_ok", "scan_finished"):
+        assert expected in kinds, f"missing {expected} in {kinds}"
+
+    # === The include filter is reported, not silently applied. ===
+    # A stock Home Assistant tags nothing, so with includeByDefault off the
+    # scan legitimately finds nothing - the page has to say so.
+    def _status():
+        return _json.loads(hass.succeed("curl -fsSk -b /tmp/cj https://bridge/status/api/state"))
+
+    hass.succeed(
+        "curl -fsSk -b /tmp/cj -X POST -H 'Content-Type: application/json' "
+        "-d '{\"homeAssistantIncludeByDefault\":false}' "
+        "https://bridge/status/api/homeassistant"
+    )
+    hass.succeed(
+        "curl -fsSk -b /tmp/cj -X POST -H 'Content-Type: application/json' "
+        "-d '{}' https://bridge/status/api/homeassistant/test"
+    )
+    discovery = _status()["homeassistant"]["discovery"]
+    assert discovery["entities_seen"] > 0, discovery
+    assert discovery["entities_included"] == 0, discovery
+    assert discovery["excluded_sample"], (
+        f"the page must name entities the filter dropped: {discovery}")
+
+    # Turning it back on includes them again, without a restart.
+    hass.succeed(
+        "curl -fsSk -b /tmp/cj -X POST -H 'Content-Type: application/json' "
+        "-d '{\"homeAssistantIncludeByDefault\":true}' "
+        "https://bridge/status/api/homeassistant"
+    )
+    hass.succeed(
+        "curl -fsSk -b /tmp/cj -X POST -H 'Content-Type: application/json' "
+        "-d '{}' https://bridge/status/api/homeassistant/test"
+    )
+    discovery = _status()["homeassistant"]["discovery"]
+    assert discovery["entities_included"] == discovery["entities_seen"], discovery
   '';
 }

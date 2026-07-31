@@ -1,8 +1,8 @@
 # diyHue Nix packaging
 
 This directory packages diyHue as a Nix flake, exposes a NixOS service module,
-and ships two VM integration tests. Everything lives under `nix/`; the flake
-entrypoint is `../flake.nix`.
+and ships a pytest suite plus two VM integration tests. Everything lives under
+`nix/`; the flake entrypoint is `../flake.nix`.
 
 ## Flake outputs
 
@@ -13,10 +13,11 @@ entrypoint is `../flake.nix`.
 .#nixosModules.diyhue            # NixOS service module
 .#nixosModules.default           # alias for the above
 
+.#checks.<system>.unitTests      # pytest suite, no VM
 .#checks.<system>.vmTest         # baseline: diyHue + Home Assistant on one VLAN
 .#checks.<system>.vmTestNginx    # diyHue behind nginx, hueadm-driven e2e
 
-.#devShells.<system>.default     # python3 + openssl + libfaketime for hacking
+.#devShells.<system>.default     # python3 + pytest + openssl + libfaketime
 ```
 
 The flake input pins `github:NixOS/nixpkgs/nixos-unstable`; lock file lives
@@ -116,6 +117,16 @@ The `vmTestNginx` check is the canonical example. Sketch:
       sslCertificate = "/var/lib/diyhue/cert.pem";
       sslCertificateKey = "/var/lib/diyhue/cert.pem";
       locations."/".proxyPass = "http://127.0.0.1:8080";
+
+      # The status page at /status/ streams live updates over a websocket.
+      locations."/status/ws" = {
+        proxyPass = "http://127.0.0.1:8080";
+        proxyWebsockets = true;       # forwards Upgrade / Connection
+        extraConfig = ''
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        '';
+      };
     };
   };
 
@@ -127,6 +138,13 @@ The `vmTestNginx` check is the canonical example. Sketch:
 ```
 
 Why this works:
+- `proxyWebsockets = true` is what emits `proxy_http_version 1.1` plus the
+  `Upgrade` / `Connection` headers. `recommendedProxySettings` does **not**
+  include them, and without them Werkzeug does not recognise the request as a
+  websocket, so Flask answers `400 Bad Request` and the status page silently
+  falls back to polling. The long read/send timeouts stop nginx from dropping
+  a socket that is idle between events (the page also sends a keepalive every
+  25 seconds).
 - `diyhue-cert.service` is a oneshot the module emits when `generateCert =
   true`. It runs `${pkg}/bin/diyhue-genCert` with all the binaries it needs
   (python3, openssl, libfaketime, bash) already on its PATH, writes
@@ -149,17 +167,32 @@ missing rather than silently rolling a fresh one.
 ## Run the tests
 
 ```bash
-nix flake check -L                                # both VM tests
+nix flake check -L                                # everything
+nix build .#checks.x86_64-linux.unitTests -L      # pytest, seconds
 nix build .#checks.x86_64-linux.vmTest -L         # baseline
 nix build .#checks.x86_64-linux.vmTestNginx -L    # nginx + hueadm + HA e2e
 ```
 
-The upstream Python code ships no test suite (CI only smoke-runs the
-docker image for 15 seconds), so the flake checks are the test gate.
+Upstream CI only smoke-runs the docker image for 15 seconds, so the flake
+checks are the test gate. During development the same pytest suite runs
+straight from the dev shell:
+
+```bash
+nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
+```
 
 ### What each test covers
 
-`vmTest` (two nodes, ~30s):
+`unitTests` (pytest, no VM):
+
+- Home Assistant state translation against payloads captured from a real
+  instance, the `diyhue:` include filter truth table, and the colour-mode →
+  Hue model mapping.
+- Discovery keeps going when one protocol raises, and never leaves the scan
+  marked `active`.
+- `serviceManager` starts, stops and restarts integrations from config.
+
+`vmTest` (two nodes, ~50s):
 
 - diyHue is reachable on its standard ports.
 - SSDP `description.xml` advertises as a Hue bridge.
@@ -167,8 +200,16 @@ docker image for 15 seconds), so the flake checks are the test gate.
 - A `linkbutton:true` PUT pairs a Hue API user.
 - A second VM (Home Assistant) can pair and query `/api/<user>/lights`
   through the network.
+- The status page is login-gated and serves its own assets.
+- A stub Home Assistant websocket server (`stub-home-assistant`) reproduces
+  the failure modes a real HA cannot be asked for: connection refused, a
+  rejected token, and an empty entity list. Each is reported through
+  `/status/api/state`, and a scan still completes with the other protocols
+  intact.
+- Integrations are enabled and disabled at runtime; the test asserts
+  `ExecMainStartTimestamp` is unchanged, i.e. diyhue never restarted.
 
-`vmTestNginx` (two nodes, ~65s):
+`vmTestNginx` (two nodes, ~70s):
 
 - nginx terminates TLS using the cert produced by `diyhue-cert.service`;
   the served cert subject contains the MAC-derived CN (`001122fffe334455`).
@@ -183,6 +224,14 @@ docker image for 15 seconds), so the flake checks are the test gate.
   HA template script → input_boolean → template recomputed → HA WS
   `state_changed` event → diyHue `latest_states` → `stateFetch` →
   `bridgeConfig["lights"]` → REST → nginx → hueadm.
+- `status-watcher` opens `wss://bridge/status/ws` the way a browser would,
+  triggers a scan and asserts the `scan_started` → `protocol_ok` →
+  `scan_finished` events arrive live. This is the regression guard for the
+  `proxyWebsockets` requirement above.
+- With `homeAssistantIncludeByDefault` off, the status API reports
+  `entities_seen > 0` and `entities_included == 0` with a sample of the
+  entities the filter dropped - the reason a stock Home Assistant yields no
+  lights.
 
 ## Source patches the package applies
 
@@ -193,11 +242,12 @@ Documented for anyone diffing against upstream:
   `--no-cert-gen`.
 - `BridgeEmulator/HueEmulator3.py` — `runHttps` reads `CERT_PATH`; wrap
   `app.wsgi_app` in `werkzeug.middleware.proxy_fix.ProxyFix`.
-- `BridgeEmulator/services/homeAssistantWS.py` — default local vars in
-  `create_ws_client` before the optional-config branches (fixes
-  `UnboundLocalError: use_https`).
 - `BridgeEmulator/genCert.sh` — rewrite `/opt/hue-emulator/openssl.conf`,
   emit private key + public cert into the caller-supplied config dir
   instead of cwd.
-- `BridgeEmulator/logManager/logger.py` — honour `DIYHUE_LOG_FILE` so the
-  check phase (cwd=`/`) does not crash trying to open `./diyhue.log`.
+
+Two patches were dropped once the same fixes landed in the source tree:
+`homeAssistantWS.create_ws_client` now defaults its optional config values
+(no more `UnboundLocalError: use_https`), and `logManager/logger.py` honours
+`DIYHUE_LOG_FILE` directly so the check phase (cwd=`/`) does not crash
+trying to open `./diyhue.log`.
