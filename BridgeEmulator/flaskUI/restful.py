@@ -13,6 +13,7 @@ from functions.core import capabilities, staticConfig, nextFreeId
 from flask_restful import Resource
 from flask import request
 from functions.rules import rulesProcessor
+from services import serviceManager
 from services.entertainment import entertainmentService
 from services.updateManager import githubCheck, versionCheck, githubInstall
 from werkzeug.security import generate_password_hash
@@ -308,6 +309,10 @@ class ResourceElements(Resource):
             responseList.append({"success": {response_location + key: value}})
         logging.debug(responseList)
         configManager.bridgeConfig.save_config(backup=False, resource=resource)
+        if resource == "config":
+            # Enabling an integration used to require a restart because the
+            # services were only ever read at boot.
+            serviceManager.apply(bridgeConfig, changed_keys=set(putDict.keys()))
         return responseList
 
 

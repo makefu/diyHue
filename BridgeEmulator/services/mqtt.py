@@ -478,3 +478,16 @@ def mqttServer():
 
     # start the loop to keep receiving data
     client.loop_forever()
+    logging.info("MQTT service stopped")
+
+
+def stop():
+    """Disconnect the broker connection so mqttServer() returns.
+
+    Needed so the integration can be switched off from the web interface
+    without restarting the whole bridge.
+    """
+    try:
+        client.disconnect()
+    except Exception:
+        logging.debug("Error disconnecting from MQTT broker", exc_info=True)

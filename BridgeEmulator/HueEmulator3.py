@@ -100,7 +100,7 @@ def runHttp(BIND_IP, HOST_HTTP_PORT):
     app.run(host=BIND_IP, port=HOST_HTTP_PORT)
 
 def main():
-    from services import mqtt, deconz, ssdp, mdns, scheduler, remoteApi, remoteDiscover, entertainment, stateFetch, eventStreamer, homeAssistantWS, updateManager
+    from services import ssdp, mdns, scheduler, remoteApi, remoteDiscover, entertainment, stateFetch, eventStreamer, serviceManager, updateManager
     ### variables initialization
     BIND_IP = configManager.runtimeConfig.arg["BIND_IP"]
     HOST_IP = configManager.runtimeConfig.arg["HOST_IP"]
@@ -113,12 +113,9 @@ def main():
 
     Thread(target=daylightSensor, args=[bridgeConfig["config"]["timezone"], bridgeConfig["sensors"]["1"]]).start()
     ### start services
-    if bridgeConfig["config"]["deconz"]["enabled"]:
-        Thread(target=deconz.websocketClient).start()
-    if bridgeConfig["config"]["mqtt"]["enabled"]:
-        Thread(target=mqtt.mqttServer).start()
-    if bridgeConfig["config"]["homeassistant"]["enabled"]:
-        homeAssistantWS.create_ws_client(bridgeConfig)
+    # deconz, mqtt and homeassistant are reconciled against the config here and
+    # again whenever it is changed, so they can be toggled without a restart.
+    serviceManager.apply(bridgeConfig)
     if not ("discovery" in bridgeConfig["config"] and bridgeConfig["config"]["discovery"] == False):
         Thread(target=remoteDiscover.runRemoteDiscover, args=[bridgeConfig["config"]]).start()
     Thread(target=remoteApi.runRemoteApi, args=[BIND_IP, bridgeConfig["config"]]).start()

@@ -17,6 +17,8 @@ bridgeConfig = configManager.bridgeConfig.yaml_config
 logging = logManager.logger.get_logger(__name__)
 devicesIds = {"sensors": {}, "lights": {}}
 motionSensors = ["TRADFRI motion sensor", "lumi.sensor_motion", "lumi.vibration.aq1"]
+# Held so the integration can be shut down from the web interface.
+_ws_client = None
 
 def getObject(resource, id):
     if id in devicesIds[resource]:
@@ -144,9 +146,28 @@ def websocketClient():
             except Exception as e:
                 logging.info("unable to process the request" + str(e))
 
+    global _ws_client
     try:
         ws = EchoClient('ws://' + bridgeConfig["config"]["deconz"]["deconzHost"] + ':' + str(bridgeConfig["config"]["deconz"]["websocketport"]))
+        _ws_client = ws
         ws.connect()
         ws.run_forever()
     except KeyboardInterrupt:
         ws.close()
+    finally:
+        _ws_client = None
+
+
+def stop():
+    """Close the deConz websocket so websocketClient() returns.
+
+    Needed so the integration can be switched off from the web interface
+    without restarting the whole bridge.
+    """
+    client = _ws_client
+    if client is None:
+        return
+    try:
+        client.close()
+    except Exception:
+        logging.debug("Error closing deConz websocket", exc_info=True)
