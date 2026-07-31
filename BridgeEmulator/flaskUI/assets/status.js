@@ -198,6 +198,11 @@ function renderHomeAssistant() {
   health.appendChild(metric(discovery.entities_included ?? 0, 'included'));
   health.appendChild(metric(discovery.entities_tagged ?? 0, 'tagged'));
 
+  // Included is not the same as usable: switches and helpers pass the filter
+  // but report no brightness or colour, so they can never be a Hue light.
+  const incapable = discovery.entities_without_capabilities ?? 0;
+  const usable = (discovery.entities_included ?? 0) - incapable;
+  health.appendChild(metric(usable, 'usable as lights'));
   const registered = ((state.protocols || {}).homeassistant || {}).lights ?? 0;
   health.appendChild(metric(registered, 'registered as lights'));
 
@@ -220,13 +225,20 @@ function renderHomeAssistant() {
     code.textContent = 'diyhue: include';
     diagnosis.append(code, document.createTextNode(
       ` to the entities you want. Examples that were skipped: ${(discovery.excluded_sample || []).join(', ')}`));
-  } else if (ha.enabled && discovery.entities_included > 0 && registered === 0) {
+  } else if (ha.enabled && discovery.entities_included > 0 && usable === 0) {
+    // A stock Home Assistant carries many more switch-like helpers than lamps.
+    diagnosis.className = 'diagnosis';
+    diagnosis.textContent =
+      `All ${discovery.entities_included} included entities report no light `
+      + 'capabilities, so none of them can be exposed as a lamp. Skipped: '
+      + `${(discovery.without_capabilities_sample || []).join(', ')}`;
+  } else if (ha.enabled && usable > 0 && registered === 0) {
     // Passing the include filter only makes an entity a candidate. Nothing
     // reaches the light list until a discovery scan registers it.
     diagnosis.className = 'diagnosis';
     diagnosis.append(document.createTextNode(
-      `${discovery.entities_included} entities are included, but none of them are `
-      + 'registered as lights yet. Home Assistant entities only appear in the app '
+      `${usable} entities can be exposed as lights, but none of them are `
+      + 'registered yet. Home Assistant entities only appear in the app '
       + 'once a discovery scan has added them.'));
     const action = document.createElement('button');
     action.type = 'button';
@@ -234,6 +246,12 @@ function renderHomeAssistant() {
     action.textContent = 'Scan for lights';
     action.addEventListener('click', () => startScan());
     diagnosis.append(action);
+  } else if (ha.enabled && incapable > 0) {
+    diagnosis.className = 'diagnosis info';
+    diagnosis.textContent =
+      `${incapable} included entities report no light capabilities and are not `
+      + 'exposed as lamps - switches and helpers have no brightness or colour. '
+      + `For example: ${(discovery.without_capabilities_sample || []).join(', ')}`;
   }
 }
 

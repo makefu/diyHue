@@ -64,14 +64,17 @@ class TestModelMapping:
         """`and` binds tighter than `or`, so this combination used to fall through."""
         assert ha.model_id_for(["rgbww", "color_temp"]) == "LCT015"
 
-    def test_switch_entities_map_to_a_plug(self):
-        """switch.* entities report no colour modes and used to be dropped."""
-        assert ha.model_id_for([], "switch.arbeitszimmer_stecker1") == "LOM001"
+    def test_an_entity_without_capabilities_is_not_a_light(self):
+        """A Home Assistant install has far more switches than lamps.
+
+        `switch.*` entities report no colour modes at all; mapping them onto a
+        plug turned every helper toggle into a bridge light.
+        """
+        assert ha.model_id_for([]) is None
+        assert ha.model_id_for(None) is None
 
     def test_unknown_modes_map_to_nothing(self):
-        assert ha.model_id_for([]) is None
         assert ha.model_id_for(["white"]) is None
-        assert ha.model_id_for([], "light.mystery") is None
 
 
 class TestDiscoveryStats:
@@ -103,6 +106,23 @@ class TestDiscoveryStats:
             "light.arbeitszimmer_buttonbox_led_strip",
             "light.arbeitszimmer_stecker1",
         }
+
+    def test_entities_without_capabilities_are_counted_and_named(self):
+        """Included switches never become lights - the page has to say so."""
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": True})
+        ha.record_states([
+            payloads.RGB_STRIP_ON,
+            {"entity_id": "switch.arbeitszimmer_stecker1", "state": "off", "attributes": {}},
+            {"entity_id": "switch.kuche_autoplay", "state": "off", "attributes": {}},
+        ])
+
+        stats = ha.status()["discovery"]
+        assert stats["entities_included"] == 3
+        assert stats["entities_without_capabilities"] == 2
+        assert stats["without_capabilities_sample"] == [
+            "switch.arbeitszimmer_stecker1",
+            "switch.kuche_autoplay",
+        ]
 
     def test_tagged_entities_are_counted_separately(self):
         ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})

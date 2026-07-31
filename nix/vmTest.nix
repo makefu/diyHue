@@ -21,8 +21,9 @@ let
       MODE = sys.argv[1]
       PORT = int(sys.argv[2])
 
-      # Two entities that exercise both model-id branches: a colour light and a
-      # switch, which carries no supported_color_modes at all.
+      # A colour light, a plug that declares onoff, and a switch helper with no
+      # capabilities at all - the last one passes the include filter but must
+      # never reach the bridge as a lamp.
       ENTITIES = [
           {
               "entity_id": "light.stub_strip",
@@ -35,9 +36,17 @@ let
               },
           },
           {
-              "entity_id": "switch.stub_plug",
+              "entity_id": "light.stub_plug",
               "state": "off",
-              "attributes": {"friendly_name": "Stub plug"},
+              "attributes": {
+                  "friendly_name": "Stub plug",
+                  "supported_color_modes": ["onoff"],
+              },
+          },
+          {
+              "entity_id": "switch.stub_autoplay",
+              "state": "off",
+              "attributes": {"friendly_name": "Stub autoplay"},
           },
       ]
 
@@ -324,8 +333,12 @@ pkgs.testers.nixosTest {
           '{"enabled":true,"homeAssistantIp":"127.0.0.1","homeAssistantPort":8126,'
           '"homeAssistantToken":"good","homeAssistantIncludeByDefault":true}')
     state = _wait_for(
-        lambda s: s["homeassistant"]["discovery"]["entities_included"] == 2,
+        lambda s: s["homeassistant"]["discovery"]["entities_included"] == 3,
         "the stub entities to pass the include filter")
+    discovery = state["homeassistant"]["discovery"]
+    assert discovery["entities_without_capabilities"] == 1, (
+        f"the capability-less switch must be counted, not hidden: {discovery}")
+    assert discovery["without_capabilities_sample"] == ["switch.stub_autoplay"], discovery
     assert state["protocols"]["homeassistant"]["lights"] == 0, (
         "entities must not count as registered lights before a scan: "
         f"{state['protocols']['homeassistant']}")
@@ -334,12 +347,15 @@ pkgs.testers.nixosTest {
     state = _wait_for(lambda s: s["scan"].get("state") == "idle",
                       "the scan to register the stub entities", timeout=240)
     assert state["protocols"]["homeassistant"]["lights"] == 2, (
-        f"the scan must register both entities: {state['protocols']['homeassistant']}")
+        "only the entities with light capabilities may be registered: "
+        f"{state['protocols']['homeassistant']}")
     lights = _json.loads(bridge.succeed(
         f"curl -fsS http://localhost/api/{username}/lights"))
     names = {light["name"] for light in lights.values()}
     assert {"Stub plug", "Stub strip"} <= names, (
         f"the app's light list must show the registered entities: {sorted(names)}")
+    assert "Stub autoplay" not in names, (
+        f"a switch with no capabilities must not become a light: {sorted(names)}")
 
     bridge.succeed("systemctl stop stub-ha-entities")
 

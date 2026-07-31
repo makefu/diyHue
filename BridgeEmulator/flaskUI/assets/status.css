@@ -195,6 +195,8 @@ main {
 }
 
 .diagnosis.error { border-left-color: var(--error); }
+/* Nothing is wrong, the page is only explaining a number. */
+.diagnosis.info { border-left-color: var(--muted); color: var(--muted); }
 .diagnosis code { background: rgba(127, 127, 127, 0.18); padding: 0 0.25rem; border-radius: 3px; }
 .diagnosis .button.inline { margin-left: 0.6rem; vertical-align: middle; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
 

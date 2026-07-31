@@ -84,6 +84,25 @@ class TestErrorIsolation:
         assert bridgeConfig["temp"]["scanResult"]["lastscan"] != "active"
         assert bridgeConfig["config"]["zigbee_device_discovery_info"]["status"] == "ready"
 
+    def test_a_home_assistant_switch_does_not_become_a_light(self, monkeypatch):
+        """Regression: switches outnumber lamps, and they have no light state."""
+        from services import homeAssistantWS
+
+        homeAssistantWS.configure({"enabled": True, "homeAssistantIncludeByDefault": True})
+        homeAssistantWS.record_states([
+            {"entity_id": "light.desk", "state": "on",
+             "attributes": {"friendly_name": "Desk", "supported_color_modes": ["rgb"]}},
+            {"entity_id": "switch.autoplay", "state": "off",
+             "attributes": {"friendly_name": "Autoplay"}},
+        ])
+        # The states are already cached; do not open a websocket for them.
+        monkeypatch.setattr(homeAssistantWS, "request_states", homeAssistantWS.status)
+
+        detected = []
+        homeAssistantWS.discover(detected)
+
+        assert [light["name"] for light in detected] == ["Desk"]
+
     def test_unknown_model_id_is_not_stored_under_a_false_key(self, monkeypatch):
         def bogus(detected, device_ips):
             light = found_light("Mystery lamp", "light.mystery")

@@ -85,7 +85,9 @@ def _blank_status():
             "entities_seen": 0,
             "entities_included": 0,
             "entities_tagged": 0,
+            "entities_without_capabilities": 0,
             "excluded_sample": [],
+            "without_capabilities_sample": [],
             "last_discovery": None,
         },
     }
@@ -146,8 +148,13 @@ def reset_for_tests():
     statusRegistry.replace("homeassistant", status())
 
 
-def model_id_for(supported_colour_modes, entity_id=None):
+def model_id_for(supported_colour_modes):
     """Map Home Assistant colour modes onto the closest Hue model id.
+
+    An entity that declares no colour modes is not a lamp. Home Assistant
+    installs carry far more ``switch.*`` helpers - autoplay toggles, IR
+    filters, freeze switches - than actual lights, and every one of them would
+    otherwise arrive in the bridge as a plug.
 
     The original expression relied on ``or``/``and`` precedence and therefore
     only applied the colour-temperature check to the ``rgbww`` term.
@@ -160,11 +167,6 @@ def model_id_for(supported_colour_modes, entity_id=None):
     if BRIGHTNESS in modes:
         return "LWB010"
     if ONOFF in modes:
-        return "LOM001"
-    # switch.* entities carry no colour modes at all, so they used to be
-    # dropped even though the include filter and the service call both
-    # support them. They are on/off by definition.
-    if isinstance(entity_id, str) and entity_id.startswith("switch."):
         return "LOM001"
     return None
 
@@ -203,6 +205,8 @@ def record_states(ha_states):
     seen = 0
     tagged = 0
     excluded = []
+    incapable = []
+    incapable_count = 0
     included = {}
     for ha_state in ha_states or []:
         if not _is_supported_entity(ha_state):
@@ -212,6 +216,13 @@ def record_states(ha_states):
             tagged += 1
         if _should_include(ha_state):
             included[ha_state["entity_id"]] = ha_state
+            # Included, but nothing a Hue client could drive. Counted here so
+            # the difference between "included" and "usable as a light" is
+            # visible without having to run a scan and compare the totals.
+            if model_id_for(ha_state.get("attributes", {}).get("supported_color_modes")) is None:
+                incapable_count += 1
+                if len(incapable) < EXCLUDED_SAMPLE_SIZE:
+                    incapable.append(ha_state["entity_id"])
         elif len(excluded) < EXCLUDED_SAMPLE_SIZE:
             excluded.append(ha_state["entity_id"])
 
@@ -219,14 +230,17 @@ def record_states(ha_states):
     latest_states.update(included)
     for entity_id in included:
         logging.info(f"Found {entity_id}")
-    logging.info("Home Assistant states: %s supported entities, %s included, %s tagged",
-                 seen, len(included), tagged)
+    logging.info("Home Assistant states: %s supported entities, %s included, %s tagged, "
+                 "%s without light capabilities",
+                 seen, len(included), tagged, incapable_count)
     _set_discovery_status(
         include_by_default=include_by_default,
         entities_seen=seen,
         entities_included=len(included),
         entities_tagged=tagged,
+        entities_without_capabilities=incapable_count,
         excluded_sample=excluded,
+        without_capabilities_sample=incapable,
         last_discovery=_now(),
     )
     return len(included)
@@ -571,9 +585,10 @@ def discover(detectedLights):
         attributes = ha_state.get("attributes", {})
         lightName = attributes.get("friendly_name", entity_id)
 
-        model_id = model_id_for(attributes.get('supported_color_modes', []), entity_id)
+        model_id = model_id_for(attributes.get('supported_color_modes', []))
         if model_id is None:
-            logging.info("unknown model id " + str(attributes.get('supported_color_modes')))
+            logging.info("%s has no light capabilities (%s), skipping",
+                         entity_id, attributes.get('supported_color_modes'))
             continue
 
         logging.info("HomeAssistant_ws: found light {}".format(lightName))

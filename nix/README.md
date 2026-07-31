@@ -193,6 +193,8 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
 - `serviceManager` starts, stops and restarts integrations from config.
 - `/status/api/state` counts the lights each integration actually registered,
   which is a different number from the entities its include filter accepts.
+- An entity that declares no colour modes is not mapped to a Hue model, and
+  the count of those is reported so the drop is visible rather than silent.
 - The status page link is injected into the prebuilt app shell.
 
 `vmTest` (two nodes, ~50s):
@@ -209,9 +211,11 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
   rejected token, and an empty entity list. Each is reported through
   `/status/api/state`, and a scan still completes with the other protocols
   intact.
-- The stub's `entities` mode serves a colour light and a switch, proving that
-  entities passing the include filter count as `0` registered lights until a
-  scan runs, and appear in `/api/<user>/lights` afterwards.
+- The stub's `entities` mode serves a colour light, an on/off light and a
+  capability-less switch, proving that entities passing the include filter
+  count as `0` registered lights until a scan runs, that the switch is counted
+  as unusable rather than silently dropped, and that only the two lights turn
+  up in `/api/<user>/lights` afterwards.
 - The authenticated `/` carries the injected link to `/status/`.
 - Integrations are enabled and disabled at runtime; the test asserts
   `ExecMainStartTimestamp` is unchanged, i.e. diyhue never restarted.
