@@ -9,6 +9,7 @@ healthy, so the state has to carry both numbers.
 import pytest
 
 import configManager
+from flaskUI.core import views as core_views
 from flaskUI.status import views
 from lights import discover
 from services import statusRegistry
@@ -67,3 +68,19 @@ class TestRegisteredLightCounts:
         state = views._build_state()
         assert state["scan"].get("lastscan") is None
 
+
+class TestStatusLinkInjection:
+    """The bundled app is a prebuilt archive, so the link is added on the way out."""
+
+    def test_the_link_is_injected_before_the_closing_body_tag(self):
+        page = core_views.with_status_link("<html><body><div id=root></div></body></html>")
+        assert 'href="/status/"' in page
+        assert page.index('href="/status/"') < page.index("</body>")
+
+    def test_a_page_without_a_body_tag_is_left_alone(self):
+        original = "<html><div id=root></div></html>"
+        assert core_views.with_status_link(original) == original
+
+    def test_the_link_is_not_added_twice(self):
+        once = core_views.with_status_link("<html><body></body></html>")
+        assert core_views.with_status_link(once).count('href="/status/"') == 1

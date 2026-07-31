@@ -244,6 +244,12 @@ pkgs.testers.nixosTest {
     assert "wled" in state["protocols"], state["protocols"]
     assert state["log"], "the status API must expose a log tail"
 
+    # The bundled app is a prebuilt archive, so the way to reach the status page
+    # from it is a link injected into the served markup.
+    app_shell = bridge.succeed("curl -fsS -b /tmp/cj http://localhost/")
+    assert 'href="/status/"' in app_shell, (
+        f"the app shell must link to the status page: {app_shell[-400:]}")
+
     # === Integrations toggle without restarting the service ===
     started_at = bridge.succeed(
         "systemctl show diyhue -p ExecMainStartTimestamp --value"

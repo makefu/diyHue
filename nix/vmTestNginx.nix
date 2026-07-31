@@ -370,6 +370,11 @@ pkgs.testers.nixosTest {
     assert "/assets/index-BGcdHbbG.js" in index_html, (
         f"authenticated / did not render the SPA shell: {index_html[:200]}"
     )
+    # The SPA is a prebuilt release archive, so the only way to reach the status
+    # page from it is the link diyHue injects into the served markup.
+    assert 'href="/status/"' in index_html, (
+        f"the SPA shell must link to the status page: {index_html[-400:]}"
+    )
 
     # The status page is served by diyHue itself, not by the release bundle.
     status_html = hass.succeed("curl -fsSk -b /tmp/cj https://bridge/status/")

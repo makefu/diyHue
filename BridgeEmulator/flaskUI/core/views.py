@@ -17,10 +17,42 @@ import subprocess
 logging = logManager.logger.get_logger(__name__)
 bridgeConfig = configManager.bridgeConfig.yaml_config
 core = Blueprint('core',__name__)
+
+# The single-page app is built in a separate repository and ships as a minified
+# release archive, so the only way to point at the status page from the app
+# itself is to add the link to the markup on the way out. React owns its own
+# root element and leaves the rest of <body> alone, so a fixed-position anchor
+# survives the app mounting.
+STATUS_LINK_ID = 'diyhue-status-link'
+STATUS_LINK = (
+    '<style>'
+    f'#{STATUS_LINK_ID}{{position:fixed;right:1rem;bottom:1rem;z-index:9999;'
+    'display:inline-flex;align-items:center;gap:0.45rem;padding:0.5rem 0.9rem;'
+    'border-radius:999px;background:#0a84ff;color:#fff;font:600 0.85rem/1 '
+    'system-ui,sans-serif;text-decoration:none;box-shadow:0 2px 10px rgba(0,0,0,0.35);}'
+    f'#{STATUS_LINK_ID}:hover{{filter:brightness(1.1);}}'
+    '</style>'
+    f'<a id="{STATUS_LINK_ID}" href="/status/" '
+    'title="Scan progress, integration health and logs">'
+    '<i class="fas fa-heartbeat"></i>Bridge status</a>'
+)
+
+
+def with_status_link(page):
+    """Add the status page link to the bundled app's markup."""
+    if STATUS_LINK_ID in page:
+        return page
+    if '</body>' not in page:
+        logging.debug("index.html has no </body>, not adding the status page link")
+        return page
+    return page.replace('</body>', STATUS_LINK + '</body>', 1)
+
+
 @core.route('/')
 @flask_login.login_required
 def index():
-    return render_template('index.html', groups=bridgeConfig["groups"], lights=bridgeConfig["lights"])
+    return with_status_link(
+        render_template('index.html', groups=bridgeConfig["groups"], lights=bridgeConfig["lights"]))
 
 @core.route('/get-key')
 #@flask_login.login_required

@@ -193,6 +193,7 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
 - `serviceManager` starts, stops and restarts integrations from config.
 - `/status/api/state` counts the lights each integration actually registered,
   which is a different number from the entities its include filter accepts.
+- The status page link is injected into the prebuilt app shell.
 
 `vmTest` (two nodes, ~50s):
 
@@ -211,6 +212,7 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
 - The stub's `entities` mode serves a colour light and a switch, proving that
   entities passing the include filter count as `0` registered lights until a
   scan runs, and appear in `/api/<user>/lights` afterwards.
+- The authenticated `/` carries the injected link to `/status/`.
 - Integrations are enabled and disabled at runtime; the test asserts
   `ExecMainStartTimestamp` is unchanged, i.e. diyhue never restarted.
 
@@ -237,6 +239,8 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
   `entities_seen > 0` and `entities_included == 0` with a sample of the
   entities the filter dropped - the reason a stock Home Assistant yields no
   lights.
+- The SPA shell served through nginx carries the injected `/status/` link, and
+  the imported HA light is attributed to the `homeassistant` integration.
 
 ## Source patches the package applies
 
