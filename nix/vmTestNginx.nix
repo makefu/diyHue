@@ -487,7 +487,15 @@ pkgs.testers.nixosTest {
         "curl -fsSk -b /tmp/cj -X POST -H 'Content-Type: application/json' "
         "-d '{}' https://bridge/status/api/homeassistant/test"
     )
-    discovery = _status()["homeassistant"]["discovery"]
+    state = _status()
+    discovery = state["homeassistant"]["discovery"]
     assert discovery["entities_included"] == discovery["entities_seen"], discovery
+
+    # Included entities and registered lights are separate numbers: this bridge
+    # has already scanned, so the light it imported has to be attributed to the
+    # Home Assistant integration rather than left implicit in the entity count.
+    assert state["protocols"]["homeassistant"]["lights"] > 0, (
+        f"lights imported from Home Assistant must be counted: {state['protocols']}")
+    assert state["protocols"]["wled"]["lights"] == 0, state["protocols"]["wled"]
   '';
 }

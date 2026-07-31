@@ -151,8 +151,10 @@ main {
 }
 
 .protocol .name { font-weight: 600; font-size: 0.92rem; }
+.protocol .count { font-size: 0.78rem; color: var(--muted); margin-left: auto; white-space: nowrap; }
 .protocol .detail { font-size: 0.8rem; color: var(--muted); word-break: break-word; }
 .protocol .detail.error { color: var(--error); }
+.protocol .count + input[type="checkbox"] { margin-left: 0; }
 .protocol input[type="checkbox"] { margin-left: auto; }
 
 .dot {
@@ -194,6 +196,7 @@ main {
 
 .diagnosis.error { border-left-color: var(--error); }
 .diagnosis code { background: rgba(127, 127, 127, 0.18); padding: 0 0.25rem; border-radius: 3px; }
+.diagnosis .button.inline { margin-left: 0.6rem; vertical-align: middle; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
 
 .settings-grid {
   display: grid;

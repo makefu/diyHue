@@ -56,6 +56,18 @@ function setLink(mode, text) {
   linkState.textContent = text;
 }
 
+async function startScan() {
+  el('scan-button').disabled = true;
+  try {
+    await api('/status/api/scan', { method: 'POST' });
+    toast('Scan started', 'Watching for new lights…');
+  } catch (error) {
+    toast('Could not start the scan', error.message, 'error');
+    el('scan-button').disabled = false;
+  }
+  refresh();
+}
+
 // --- rendering -------------------------------------------------------------
 
 function dot(kind) {
@@ -108,7 +120,8 @@ function renderScan() {
     const found = (scan.found || []).length;
     summary.textContent = `Last scan finished ${scan.lastscan} · ${found} new light${found === 1 ? '' : 's'}`;
   } else {
-    summary.textContent = 'No scan has run since the bridge started.';
+    summary.textContent = 'No scan has run since the bridge started. '
+      + 'Lights are only added to the bridge by a scan.';
   }
 
   const progress = el('scan-progress');
@@ -185,6 +198,9 @@ function renderHomeAssistant() {
   health.appendChild(metric(discovery.entities_included ?? 0, 'included'));
   health.appendChild(metric(discovery.entities_tagged ?? 0, 'tagged'));
 
+  const registered = ((state.protocols || {}).homeassistant || {}).lights ?? 0;
+  health.appendChild(metric(registered, 'registered as lights'));
+
   const diagnosis = el('ha-diagnosis');
   diagnosis.textContent = '';
   diagnosis.className = 'diagnosis hidden';
@@ -204,6 +220,20 @@ function renderHomeAssistant() {
     code.textContent = 'diyhue: include';
     diagnosis.append(code, document.createTextNode(
       ` to the entities you want. Examples that were skipped: ${(discovery.excluded_sample || []).join(', ')}`));
+  } else if (ha.enabled && discovery.entities_included > 0 && registered === 0) {
+    // Passing the include filter only makes an entity a candidate. Nothing
+    // reaches the light list until a discovery scan registers it.
+    diagnosis.className = 'diagnosis';
+    diagnosis.append(document.createTextNode(
+      `${discovery.entities_included} entities are included, but none of them are `
+      + 'registered as lights yet. Home Assistant entities only appear in the app '
+      + 'once a discovery scan has added them.'));
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'button primary inline';
+    action.textContent = 'Scan for lights';
+    action.addEventListener('click', () => startScan());
+    diagnosis.append(action);
   }
 }
 
@@ -223,6 +253,12 @@ function integrationCard(name, entry) {
   label.className = 'name';
   label.textContent = name;
   row.appendChild(label);
+
+  const count = document.createElement('span');
+  count.className = 'count';
+  count.textContent = `${entry.lights ?? 0} lights`;
+  count.title = 'Lights registered on this bridge by this integration';
+  row.appendChild(count);
 
   const toggle = document.createElement('input');
   toggle.type = 'checkbox';
@@ -390,17 +426,7 @@ function connect() {
 
 // --- wiring ----------------------------------------------------------------
 
-el('scan-button').addEventListener('click', async () => {
-  el('scan-button').disabled = true;
-  try {
-    await api('/status/api/scan', { method: 'POST' });
-    toast('Scan started', 'Watching for new lights…');
-  } catch (error) {
-    toast('Could not start the scan', error.message, 'error');
-    el('scan-button').disabled = false;
-  }
-  refresh();
-});
+el('scan-button').addEventListener('click', () => startScan());
 
 el('ha-enabled').addEventListener('change', async (event) => {
   try {

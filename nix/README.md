@@ -191,6 +191,8 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
 - Discovery keeps going when one protocol raises, and never leaves the scan
   marked `active`.
 - `serviceManager` starts, stops and restarts integrations from config.
+- `/status/api/state` counts the lights each integration actually registered,
+  which is a different number from the entities its include filter accepts.
 
 `vmTest` (two nodes, ~50s):
 
@@ -206,6 +208,9 @@ nix develop --command bash -c 'cd BridgeEmulator && pytest -q tests'
   rejected token, and an empty entity list. Each is reported through
   `/status/api/state`, and a scan still completes with the other protocols
   intact.
+- The stub's `entities` mode serves a colour light and a switch, proving that
+  entities passing the include filter count as `0` registered lights until a
+  scan runs, and appear in `/api/<user>/lights` afterwards.
 - Integrations are enabled and disabled at runtime; the test asserts
   `ExecMainStartTimestamp` is unchanged, i.e. diyhue never restarted.
 

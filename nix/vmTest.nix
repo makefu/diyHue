@@ -21,6 +21,26 @@ let
       MODE = sys.argv[1]
       PORT = int(sys.argv[2])
 
+      # Two entities that exercise both model-id branches: a colour light and a
+      # switch, which carries no supported_color_modes at all.
+      ENTITIES = [
+          {
+              "entity_id": "light.stub_strip",
+              "state": "on",
+              "attributes": {
+                  "friendly_name": "Stub strip",
+                  "supported_color_modes": ["hs"],
+                  "brightness": 128,
+                  "hs_color": [180.0, 50.0],
+              },
+          },
+          {
+              "entity_id": "switch.stub_plug",
+              "state": "off",
+              "attributes": {"friendly_name": "Stub plug"},
+          },
+      ]
+
 
       async def handler(websocket):
           await websocket.send(json.dumps({"type": "auth_required", "ha_version": "2026.7.0"}))
@@ -35,7 +55,7 @@ let
               if message.get("type") == "get_states":
                   # An empty list used to leave discovery blocked for its full
                   # 60 second timeout.
-                  reply["result"] = []
+                  reply["result"] = ENTITIES if MODE == "entities" else []
               await websocket.send(json.dumps(reply))
 
 
@@ -286,7 +306,46 @@ pkgs.testers.nixosTest {
     assert elapsed < 30, f"an empty entity list blocked for {elapsed:.0f}s"
     assert result["status"]["discovery"]["entities_seen"] == 0, result["status"]
 
+    bridge.succeed("systemctl stop stub-ha-empty")
+
+    # === Included entities are not lights until a scan registers them ===
+    # The reported symptom: the status page said every entity was included while
+    # the app's light list stayed empty, because no scan had ever run.
+    bridge.succeed("systemd-run --unit=stub-ha-entities "
+                   "${stubHomeAssistant}/bin/stub-home-assistant entities 8126")
+    bridge.wait_for_open_port(8126)
+    _post("/status/api/homeassistant",
+          '{"enabled":true,"homeAssistantIp":"127.0.0.1","homeAssistantPort":8126,'
+          '"homeAssistantToken":"good","homeAssistantIncludeByDefault":true}')
+    state = _wait_for(
+        lambda s: s["homeassistant"]["discovery"]["entities_included"] == 2,
+        "the stub entities to pass the include filter")
+    assert state["protocols"]["homeassistant"]["lights"] == 0, (
+        "entities must not count as registered lights before a scan: "
+        f"{state['protocols']['homeassistant']}")
+
+    _post("/status/api/scan")
+    state = _wait_for(lambda s: s["scan"].get("state") == "idle",
+                      "the scan to register the stub entities", timeout=240)
+    assert state["protocols"]["homeassistant"]["lights"] == 2, (
+        f"the scan must register both entities: {state['protocols']['homeassistant']}")
+    lights = _json.loads(bridge.succeed(
+        f"curl -fsS http://localhost/api/{username}/lights"))
+    names = {light["name"] for light in lights.values()}
+    assert {"Stub plug", "Stub strip"} <= names, (
+        f"the app's light list must show the registered entities: {sorted(names)}")
+
+    bridge.succeed("systemctl stop stub-ha-entities")
+
     # === Disabling and re-enabling takes effect immediately ===
+    bridge.succeed("systemd-run --unit=stub-ha-empty2 "
+                   "${stubHomeAssistant}/bin/stub-home-assistant empty 8125")
+    bridge.wait_for_open_port(8125)
+    _post("/status/api/homeassistant",
+          '{"enabled":true,"homeAssistantIp":"127.0.0.1","homeAssistantPort":8125,'
+          '"homeAssistantToken":"good","homeAssistantIncludeByDefault":true}')
+    _wait_for(lambda s: s["homeassistant"]["authenticated"],
+              "the stub Home Assistant to authenticate")
     _post("/status/api/service/homeassistant", '{"enabled":false}')
     assert _state()["services"]["homeassistant"]["running"] is False
     _post("/status/api/service/homeassistant", '{"enabled":true}')
@@ -300,6 +359,6 @@ pkgs.testers.nixosTest {
         f"diyhue restarted ({started_at!r} -> {still_started_at!r}); "
         "integrations must be switchable at runtime"
     )
-    bridge.succeed("systemctl stop stub-ha-empty")
+    bridge.succeed("systemctl stop stub-ha-empty2")
   '';
 }

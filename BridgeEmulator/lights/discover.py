@@ -264,6 +264,14 @@ class DiscoveryProtocol:
     # flag, so the web interface can say so instead of offering a checkbox
     # that would leave them enabled but unusable.
     toggleable: bool = True
+    # The `protocol` values the lights this discovery creates are stored under.
+    # Usually the protocol's own name, but a few differ, so counting how many
+    # lights an integration actually contributes needs the mapping spelled out.
+    light_protocols: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not self.light_protocols:
+            self.light_protocols = (self.name,)
 
 
 def _enabled_flag(key: str) -> Callable[[Dict], bool]:
@@ -289,12 +297,14 @@ PROTOCOLS = [
     DiscoveryProtocol("deconz", lambda detected, ips: deconz.discover(detected, bridgeConfig["config"]["deconz"]),
                       _enabled_flag("deconz")),
     DiscoveryProtocol("homeassistant", lambda detected, ips: homeAssistantWS.discover(detected),
-                      _enabled_flag("homeassistant")),
+                      _enabled_flag("homeassistant"),
+                      light_protocols=("homeassistant_ws",)),
     DiscoveryProtocol("yeelight", lambda detected, ips: yeelight.discover(detected),
                       _enabled_flag("yeelight")),
     # native_multi probe all esp8266 lights with firmware from diyhue repo
     DiscoveryProtocol("native_multi", lambda detected, ips: native_multi.discover(detected, ips),
-                      _enabled_flag("native_multi")),
+                      _enabled_flag("native_multi"),
+                      light_protocols=("native_multi", "native_single", "native")),
     DiscoveryProtocol("tasmota", lambda detected, ips: tasmota.discover(detected, ips),
                       _enabled_flag("tasmota")),
     # Most of the other discoveries are disabled by having no IP address

@@ -41,10 +41,19 @@ HOME_ASSISTANT_SETTINGS = {
 }
 
 
+def _lights_per_protocol():
+    """How many lights the bridge currently holds, keyed by light protocol."""
+    counts = {}
+    for light in bridgeConfig["lights"].values():
+        counts[light.protocol] = counts.get(light.protocol, 0) + 1
+    return counts
+
+
 def _protocol_states():
-    """Enabled state and last scan outcome for every discovery protocol."""
+    """Enabled state, last scan outcome and light count for every protocol."""
     scan = statusRegistry.get("scan")
     last_run = scan.get("protocols") or {}
+    registered = _lights_per_protocol()
     states = {}
     for protocol in discover.PROTOCOLS:
         try:
@@ -57,6 +66,9 @@ def _protocol_states():
             "managed": protocol.name in serviceManager.SERVICES,
             "toggleable": protocol.toggleable,
             "last_run": last_run.get(protocol.name, {}),
+            # Entities an integration exposes only become lights once a scan
+            # registers them; without this the page cannot tell the two apart.
+            "lights": sum(registered.get(name, 0) for name in protocol.light_protocols),
         }
     return states
 
