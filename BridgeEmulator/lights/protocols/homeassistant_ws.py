@@ -1,7 +1,12 @@
 import logManager
 from services.homeAssistantWS import connect_if_required, latest_states
-from pprint import pprint
+
 logging = logManager.logger.get_logger(__name__)
+
+
+def _kelvin_to_mired(kelvin):
+    return int(round(1000000 / kelvin))
+
 
 def translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, ha_state):
     '''
@@ -10,10 +15,10 @@ def translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, ha_sta
         "entity_id": "light.my_light",
         "state": "off",
         "attributes": {
-            "min_mireds": 153,
-            "max_mireds": 500,
+            "min_color_temp_kelvin": 2000,
+            "max_color_temp_kelvin": 6535,
             # If using color temp
-            "brightness": 254, "color_temp": 345,
+            "brightness": 254, "color_temp_kelvin": 3000,
             # If using colour:
             "brightness": 254, "hs_color": [262.317, 64.314], "rgb_color": [151, 90, 255], "xy_color": [0.243, 0.129]
             "effect_list": ["colorloop", "random"],
@@ -26,18 +31,18 @@ def translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, ha_sta
 
     Diy Hue:
     "state": {
-.        "alert": "select",
+        "alert": "select",
         "bri": 249,
         # Either ct, hs or xy
         # If ct then uses ct
         # If xy uses xy
         # If hs uses hue/sat
         "colormode": "xy",
-.        "effect": "none",
+        "effect": "none",
         "ct": 454,
         "hue": 0,
         "on": true,
-.        "reachable": true,
+        "reachable": true,
         "sat": 0,
         "xy": [
             0.478056,
@@ -46,41 +51,61 @@ def translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, ha_sta
     },
     '''
     # Copy existing state into new dict
-    diyhue_state = {}
-    for key,value in existing_diy_hue_state.items():
-        diyhue_state[key] = value
+    diyhue_state = dict(existing_diy_hue_state)
 
     # Overwrite any values set by the latest HA State
     reachable = False
     is_on = False
-    if "state" in ha_state and ha_state['state'] in ['on','off']:
+    if "state" in ha_state and ha_state['state'] in ['on', 'off']:
         reachable = True
         is_on = ha_state['state'] == 'on'
 
     diyhue_state["reachable"] = reachable
     diyhue_state["on"] = is_on
-    if "attributes" in ha_state and is_on:  # Home assistant only reports attributes if light is on
-        for key, value in ha_state['attributes'].items():
-            if key == "brightness":
-                diyhue_state['bri'] = value
-            if key == "color_temp":
-                diyhue_state['ct'] = value
-                diyhue_state['colormode'] = 'ct'
-            if key == "xy_color":
-                diyhue_state['xy'] = [value[0], value[1]]
-                diyhue_state['colormode'] = 'xy'
+    if not is_on:  # Home assistant only reports attributes if light is on
+        return diyhue_state
 
-#    logging.info("Translate, in state {}, out state: {}".format(ha_state, diyhue_state))
+    attributes = ha_state.get('attributes', {})
+    if "brightness" in attributes:
+        diyhue_state['bri'] = attributes["brightness"]
+
+    # Prefer kelvin: the outbound path sends color_temp_kelvin, and plain
+    # color_temp is deprecated in Home Assistant.
+    if attributes.get("color_temp_kelvin"):
+        diyhue_state['ct'] = _kelvin_to_mired(attributes["color_temp_kelvin"])
+        diyhue_state['colormode'] = 'ct'
+    elif attributes.get("color_temp"):
+        diyhue_state['ct'] = attributes["color_temp"]
+        diyhue_state['colormode'] = 'ct'
+
+    # Home Assistant reports degrees and percent, Hue uses 0-65535 and 0-254.
+    if "hs_color" in attributes:
+        hue, saturation = attributes["hs_color"]
+        diyhue_state['hue'] = int(round(hue / 360 * 65535))
+        diyhue_state['sat'] = int(round(saturation / 100 * 254))
+        diyhue_state['colormode'] = 'hs'
+
+    # xy is the mode Hue apps handle best, so let it win when both are present.
+    if "xy_color" in attributes:
+        value = attributes["xy_color"]
+        diyhue_state['xy'] = [value[0], value[1]]
+        diyhue_state['colormode'] = 'xy'
+
     return diyhue_state
+
 
 def set_light(light, data):
     connection = connect_if_required()
     connection.change_light(light, data)
 
+
 def get_light_state(light):
-    connect_if_required()
     entity_id = light.protocol_cfg["entity_id"]
-    homeassistant_state = latest_states[entity_id]
+    homeassistant_state = latest_states.get(entity_id)
     existing_diy_hue_state = light.state
-    # pprint(translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, homeassistant_state))
+    if homeassistant_state is None:
+        # The entity was removed from Home Assistant, or the include filter no
+        # longer matches it. Report it as unreachable instead of raising.
+        logging.debug("No cached Home Assistant state for %s", entity_id)
+        return {**existing_diy_hue_state, "reachable": False}
     return translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, homeassistant_state)

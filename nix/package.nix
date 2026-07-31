@@ -122,24 +122,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix' \
         'app = Flask(__name__, template_folder='"'"'flaskUI/templates'"'"',static_url_path="/assets", static_folder='"'"'flaskUI/assets'"'"')
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)'
 
-    # ---- homeAssistantWS.py: initialise locals so a missing optional config
-    # key does not raise UnboundLocalError at startup. ----
-    substituteInPlace BridgeEmulator/services/homeAssistantWS.py \
-      --replace-fail \
-        'def create_ws_client(bridgeConfig):
-    global homeassistant_token
-    global homeassistant_url
-    global include_by_default
-    if '"'"'homeAssistantIp'"'"' in bridgeConfig["config"]["homeassistant"]:' \
-        'def create_ws_client(bridgeConfig):
-    global homeassistant_token
-    global homeassistant_url
-    global include_by_default
-    homeassistant_ip = "127.0.0.1"
-    homeAssistant_port = 8123
-    use_https = False
-    if '"'"'homeAssistantIp'"'"' in bridgeConfig["config"]["homeassistant"]:'
-
     # ---- genCert.sh: replace hard-coded openssl.conf path and emit cert into $config ----
     substituteInPlace BridgeEmulator/genCert.sh \
       --replace-fail '/opt/hue-emulator/openssl.conf' "$out/share/diyhue/openssl.conf" \

@@ -1,0 +1,212 @@
+"""Home Assistant integration behaviour.
+
+These cover the failure modes that made the integration report "no lamps found"
+without ever explaining why.
+"""
+
+import pytest
+
+from services import homeAssistantWS as ha
+from lights.protocols import homeassistant_ws as ha_protocol
+from tests import payloads
+
+
+@pytest.fixture(autouse=True)
+def reset_state():
+    ha.reset_for_tests()
+    yield
+    ha.reset_for_tests()
+
+
+class TestShouldInclude:
+    """The include filter is the single most common reason discovery is empty."""
+
+    def test_untagged_entity_is_excluded_by_default(self):
+        assert ha._should_include(payloads.RGB_STRIP_ON, include_by_default=False) is False
+
+    def test_untagged_entity_is_included_when_include_by_default(self):
+        assert ha._should_include(payloads.RGB_STRIP_ON, include_by_default=True) is True
+
+    def test_include_tag_wins_when_not_including_by_default(self):
+        entity = payloads.tagged(payloads.RGB_STRIP_ON, "include")
+        assert ha._should_include(entity, include_by_default=False) is True
+
+    def test_exclude_tag_wins_when_including_by_default(self):
+        entity = payloads.tagged(payloads.RGB_STRIP_ON, "exclude")
+        assert ha._should_include(entity, include_by_default=True) is False
+
+    def test_non_light_domain_is_never_included(self):
+        assert ha._should_include(payloads.SENSOR, include_by_default=True) is False
+
+    def test_switch_domain_is_supported(self):
+        entity = {**payloads.PLUG_ON, "entity_id": "switch.arbeitszimmer_stecker1"}
+        assert ha._should_include(entity, include_by_default=True) is True
+
+    def test_missing_entity_id_does_not_raise(self):
+        """A malformed frame must not take the whole websocket thread down."""
+        assert ha._should_include({"state": "on", "attributes": {}}, include_by_default=True) is False
+
+
+class TestModelMapping:
+    def test_onoff_only_maps_to_plug(self):
+        assert ha.model_id_for(["onoff"]) == "LOM001"
+
+    def test_brightness_only_maps_to_dimmable(self):
+        assert ha.model_id_for(["brightness"]) == "LWB010"
+
+    def test_colour_temp_only_maps_to_ambiance(self):
+        assert ha.model_id_for(["color_temp"]) == "LTW001"
+
+    def test_rgb_maps_to_extended_colour(self):
+        assert ha.model_id_for(["rgb"]) == "LCT015"
+
+    def test_rgbww_with_colour_temp_maps_to_extended_colour(self):
+        """`and` binds tighter than `or`, so this combination used to fall through."""
+        assert ha.model_id_for(["rgbww", "color_temp"]) == "LCT015"
+
+    def test_switch_entities_map_to_a_plug(self):
+        """switch.* entities report no colour modes and used to be dropped."""
+        assert ha.model_id_for([], "switch.arbeitszimmer_stecker1") == "LOM001"
+
+    def test_unknown_modes_map_to_nothing(self):
+        assert ha.model_id_for([]) is None
+        assert ha.model_id_for(["white"]) is None
+        assert ha.model_id_for([], "light.mystery") is None
+
+
+class TestDiscoveryStats:
+    """The status page needs to explain an empty discovery, not just report it."""
+
+    def test_counts_seen_included_and_tagged(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})
+        ha.record_states([
+            payloads.RGB_STRIP_ON,
+            payloads.PLUG_OFF,
+            payloads.CT_LAMP_ON,
+            payloads.SENSOR,
+        ])
+
+        stats = ha.status()["discovery"]
+        assert stats["entities_seen"] == 3, "sensor.* must not be counted"
+        assert stats["entities_included"] == 0
+        assert stats["entities_tagged"] == 0
+        assert stats["include_by_default"] is False
+
+    def test_include_by_default_includes_everything_supported(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": True})
+        ha.record_states([payloads.RGB_STRIP_ON, payloads.PLUG_OFF, payloads.SENSOR])
+
+        stats = ha.status()["discovery"]
+        assert stats["entities_seen"] == 2
+        assert stats["entities_included"] == 2
+        assert set(ha.latest_states) == {
+            "light.arbeitszimmer_buttonbox_led_strip",
+            "light.arbeitszimmer_stecker1",
+        }
+
+    def test_tagged_entities_are_counted_separately(self):
+        ha.configure({"enabled": True, "homeAssistantIncludeByDefault": False})
+        ha.record_states([
+            payloads.tagged(payloads.RGB_STRIP_ON, "include"),
+            payloads.PLUG_OFF,
+        ])
+
+        stats = ha.status()["discovery"]
+        assert stats["entities_seen"] == 2
+        assert stats["entities_tagged"] == 1
+        assert stats["entities_included"] == 1
+
+
+class TestConfiguration:
+    def test_minimal_config_does_not_raise(self):
+        """An upgraded config.yaml only ever gains {"enabled": False}."""
+        ha.configure({"enabled": True})
+        assert ha.status()["url"] == "ws://127.0.0.1:8123/api/websocket"
+
+    def test_https_config_builds_a_wss_url(self):
+        """`use_https` was missing from the global declaration, so wss never applied."""
+        ha.configure({
+            "enabled": True,
+            "homeAssistantIp": "hass.lan",
+            "homeAssistantPort": 8123,
+            "homeAssistantUseHttps": True,
+        })
+        assert ha.status()["url"] == "wss://hass.lan:8123/api/websocket"
+
+    def test_token_is_never_exposed_in_status(self):
+        ha.configure({"enabled": True, "homeAssistantToken": "supersecret"})
+        assert "supersecret" not in repr(ha.status())
+
+
+class TestDiscoveryErrors:
+    def test_discover_without_a_connection_raises_a_typed_error(self):
+        """Used to be AttributeError on NoneType, which killed the scan thread."""
+        ha.configure({"enabled": True, "homeAssistantIp": "127.0.0.1", "homeAssistantPort": 1})
+        detected = []
+        with pytest.raises(ha.HomeAssistantUnavailable):
+            ha.discover(detected)
+        assert detected == []
+        assert ha.status()["last_error"]
+
+    def test_empty_state_list_completes_discovery_immediately(self):
+        """A falsy `result` used to leave discovery_result unset for the full 60s."""
+        ha.discovery_result.clear()
+        ha.handle_result_message({"id": 1, "type": "result", "success": True, "result": []},
+                                 message_type="getstates")
+        assert ha.discovery_result.is_set()
+        assert ha.latest_states == {}
+
+    def test_failed_result_records_the_error(self):
+        ha.discovery_result.clear()
+        ha.handle_result_message(
+            {"id": 1, "type": "result", "success": False,
+             "error": {"code": "unauthorized", "message": "Unauthorized"}},
+            message_type="getstates",
+        )
+        assert ha.discovery_result.is_set()
+        assert "Unauthorized" in ha.status()["last_error"]
+
+
+class TestStateTranslation:
+    def test_plug_off_is_reachable_but_off(self):
+        result = ha_protocol.translate_homeassistant_state_to_diyhue_state(
+            {"on": True, "bri": 200, "reachable": True}, payloads.PLUG_OFF)
+        assert result["on"] is False
+        assert result["reachable"] is True
+
+    def test_unavailable_entity_is_unreachable(self):
+        result = ha_protocol.translate_homeassistant_state_to_diyhue_state(
+            {"on": True, "reachable": True}, payloads.UNAVAILABLE)
+        assert result["reachable"] is False
+        assert result["on"] is False
+
+    def test_rgb_strip_maps_brightness_and_xy(self):
+        result = ha_protocol.translate_homeassistant_state_to_diyhue_state(
+            {"on": False, "bri": 1, "xy": [0.0, 0.0], "colormode": "ct"}, payloads.RGB_STRIP_ON)
+        assert result["on"] is True
+        assert result["bri"] == 36
+        assert result["xy"] == [0.178, 0.499]
+
+    def test_rgb_strip_maps_hue_and_saturation(self):
+        """hs_color was never translated, so hue/sat stayed at their defaults."""
+        result = ha_protocol.translate_homeassistant_state_to_diyhue_state(
+            {"on": False, "hue": 0, "sat": 0}, payloads.RGB_STRIP_ON)
+        # HA reports degrees 0-360 and percent 0-100; Hue uses 0-65535 and 0-254.
+        assert result["hue"] == pytest.approx(152.432 / 360 * 65535, abs=1)
+        assert result["sat"] == pytest.approx(76.289 / 100 * 254, abs=1)
+
+    def test_colour_temperature_is_read_from_kelvin(self):
+        """The outbound path migrated to color_temp_kelvin; inbound must match."""
+        result = ha_protocol.translate_homeassistant_state_to_diyhue_state(
+            {"on": False, "ct": 200, "colormode": "xy"}, payloads.CT_LAMP_ON)
+        assert result["colormode"] == "ct"
+        assert result["ct"] == pytest.approx(1000000 / 3000, abs=1)
+
+    def test_missing_entity_is_reported_unreachable(self):
+        """latest_states lookups used to KeyError when an entity vanished from HA."""
+        class FakeLight:
+            protocol_cfg = {"entity_id": "light.gone"}
+            state = {"on": True, "reachable": True}
+
+        result = ha_protocol.get_light_state(FakeLight())
+        assert result["reachable"] is False
