@@ -3,16 +3,24 @@ import configManager
 import socket
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple, Union, Generator
+from typing import Callable, Dict, List, Tuple, Union, Generator
 from lights.protocols import tpkasa, wled, mqtt, hyperion, yeelight, hue, deconz, native_multi, tasmota, shelly, esphome, tradfri, elgato, govee
-from services import homeAssistantWS
+from services import homeAssistantWS, statusRegistry
 from HueObjects import Light, StreamEvent
 from functions.core import nextFreeId
 from lights.light_types import lightTypes
 
 logging = logManager.logger.get_logger(__name__)
 bridgeConfig = configManager.bridgeConfig.yaml_config
+
+# A serial connect() sweep costs ~5s per /24 per port. The timeout dominates, so
+# the work is almost entirely idle wait and parallelises cleanly.
+SWEEP_WORKERS = 64
+# How often the sweep reports back, in hosts.
+SWEEP_PROGRESS_INTERVAL = 16
 
 def pretty_json(data: Union[Dict, List]) -> str:
     """
@@ -73,13 +81,31 @@ def find_hosts(port: int) -> List[str]:
     """
     Find hosts with the specified port open.
 
+    The sweep runs in a thread pool and reports progress to the status registry
+    so the web interface can show how far along it is.
+
     Args:
         port (int): The port to check.
 
     Returns:
         List[str]: A list of hosts with the port open.
     """
-    return [f'{host}:{port}' for host, port in iter_ips(port) if scanHost(host, port) == 0]
+    targets = list(iter_ips(port))
+    total = len(targets)
+    statusRegistry.update("scan", sweep={"port": port, "scanned": 0, "total": total})
+
+    found = []
+    scanned = 0
+    with ThreadPoolExecutor(max_workers=SWEEP_WORKERS) as pool:
+        for (host, host_port), result in zip(targets, pool.map(lambda t: scanHost(*t), targets)):
+            scanned += 1
+            if result == 0:
+                found.append(f'{host}:{host_port}')
+            if scanned % SWEEP_PROGRESS_INTERVAL == 0 or scanned == total:
+                statusRegistry.update("scan", sweep={"port": port, "scanned": scanned, "total": total})
+                statusRegistry.event("scan_progress", port=port, scanned=scanned,
+                                     total=total, found=len(found))
+    return found
 
 def addNewLight(modelid: str, name: str, protocol: str, protocol_cfg: Dict) -> Union[int, bool]:
     """
@@ -223,51 +249,119 @@ def get_device_ips() -> List[str]:
         return [host for ports in bridgeConfig["config"]["port"]["ports"] for host in find_hosts(ports)]
     return find_hosts(80)
 
-def discover_lights(detectedLights: List[Dict], device_ips: List[str]) -> None:
+@dataclass
+class DiscoveryProtocol:
+    """One entry in the discovery sequence.
+
+    Wrapping every protocol in the same structure means the enable check, the
+    error handling and the progress reporting are written once instead of
+    fifteen times - and one protocol raising can no longer abort the scan.
+    """
+    name: str
+    run: Callable[[List[Dict], List[str]], None]
+    is_enabled: Callable[[Dict], bool]
+    # False for protocols that are switched on by pairing rather than by a
+    # flag, so the web interface can say so instead of offering a checkbox
+    # that would leave them enabled but unusable.
+    toggleable: bool = True
+
+
+def _enabled_flag(key: str) -> Callable[[Dict], bool]:
+    return lambda config: bool(config.get(key, {}).get("enabled", False))
+
+
+def _configured(key: str) -> Callable[[Dict], bool]:
+    """hue and tradfri have no `enabled` flag; they count as on once set up."""
+    return lambda config: bool(config.get(key))
+
+
+def _elgato_discover(detectedLights: List[Dict], device_ips: List[str]) -> None:
+    # Scan with port 9123 before mDNS discovery
+    elgato_ips = find_hosts(9123)
+    logging.info(pretty_json(elgato_ips))
+    elgato.discover(detectedLights, elgato_ips)
+
+
+PROTOCOLS = [
+    # broadcast MQTT message, lights will be added by the service
+    DiscoveryProtocol("mqtt", lambda detected, ips: mqtt.discover(bridgeConfig["config"]["mqtt"]),
+                      _enabled_flag("mqtt")),
+    DiscoveryProtocol("deconz", lambda detected, ips: deconz.discover(detected, bridgeConfig["config"]["deconz"]),
+                      _enabled_flag("deconz")),
+    DiscoveryProtocol("homeassistant", lambda detected, ips: homeAssistantWS.discover(detected),
+                      _enabled_flag("homeassistant")),
+    DiscoveryProtocol("yeelight", lambda detected, ips: yeelight.discover(detected),
+                      _enabled_flag("yeelight")),
+    # native_multi probe all esp8266 lights with firmware from diyhue repo
+    DiscoveryProtocol("native_multi", lambda detected, ips: native_multi.discover(detected, ips),
+                      _enabled_flag("native_multi")),
+    DiscoveryProtocol("tasmota", lambda detected, ips: tasmota.discover(detected, ips),
+                      _enabled_flag("tasmota")),
+    # Most of the other discoveries are disabled by having no IP address
+    # (--disable-network-scan) but wled does an mdns discovery as well.
+    DiscoveryProtocol("wled", lambda detected, ips: wled.discover(detected, ips),
+                      _enabled_flag("wled")),
+    DiscoveryProtocol("hue", lambda detected, ips: hue.discover(detected, bridgeConfig["config"]["hue"]),
+                      _configured("hue"), toggleable=False),
+    DiscoveryProtocol("shelly", lambda detected, ips: shelly.discover(detected, ips),
+                      _enabled_flag("shelly")),
+    DiscoveryProtocol("esphome", lambda detected, ips: esphome.discover(detected, ips),
+                      _enabled_flag("esphome")),
+    DiscoveryProtocol("tradfri", lambda detected, ips: tradfri.discover(detected, bridgeConfig["config"]["tradfri"]),
+                      _configured("tradfri"), toggleable=False),
+    DiscoveryProtocol("hyperion", lambda detected, ips: hyperion.discover(detected),
+                      _enabled_flag("hyperion")),
+    DiscoveryProtocol("tpkasa", lambda detected, ips: tpkasa.discover(detected),
+                      _enabled_flag("tpkasa")),
+    DiscoveryProtocol("elgato", _elgato_discover, _enabled_flag("elgato")),
+    DiscoveryProtocol("govee", lambda detected, ips: govee.discover(detected),
+                      _enabled_flag("govee")),
+]
+
+
+def discover_lights(detectedLights: List[Dict], device_ips: List[str]) -> Dict:
     """
     Discover lights on the network.
+
+    Each protocol is isolated: a protocol that raises is recorded and the scan
+    carries on with the next one.
 
     Args:
         detectedLights (List[Dict]): A list to store detected lights.
         device_ips (List[str]): A list of device IP addresses to scan.
+
+    Returns:
+        Dict: Per-protocol outcome, keyed by protocol name.
     """
-    if bridgeConfig["config"]["mqtt"]["enabled"]:
-        # brioadcast MQTT message, lights will be added by the service
-        mqtt.discover(bridgeConfig["config"]["mqtt"])
-    if bridgeConfig["config"]["deconz"]["enabled"]:
-        deconz.discover(detectedLights, bridgeConfig["config"]["deconz"])
-    if bridgeConfig["config"]["homeassistant"]["enabled"]:
-        homeAssistantWS.discover(detectedLights)
-    if bridgeConfig["config"]["yeelight"]["enabled"]:
-        yeelight.discover(detectedLights)
-    # native_multi probe all esp8266 lights with firmware from diyhue repo
-    if bridgeConfig["config"]["native_multi"]["enabled"]:
-        native_multi.discover(detectedLights, device_ips)
-    if bridgeConfig["config"]["tasmota"]["enabled"]:
-        tasmota.discover(detectedLights, device_ips)
-    if bridgeConfig["config"]["wled"]["enabled"]:
-        # Most of the other discoveries are disabled by having no IP address (--disable-network-scan)
-        # But wled does an mdns discovery as well.
-        wled.discover(detectedLights, device_ips)
-    if bridgeConfig["config"]["hue"]:
-        hue.discover(detectedLights, bridgeConfig["config"]["hue"])
-    if bridgeConfig["config"]["shelly"]["enabled"]:
-        shelly.discover(detectedLights, device_ips)
-    if bridgeConfig["config"]["esphome"]["enabled"]:
-        esphome.discover(detectedLights, device_ips)
-    if bridgeConfig["config"]["tradfri"]:
-        tradfri.discover(detectedLights, bridgeConfig["config"]["tradfri"])
-    if bridgeConfig["config"]["hyperion"]["enabled"]:
-        hyperion.discover(detectedLights)
-    if bridgeConfig["config"]["tpkasa"]["enabled"]:
-        tpkasa.discover(detectedLights)
-    if bridgeConfig["config"]["elgato"]["enabled"]:
-        # Scan with port 9123 before mDNS discovery
-        elgato_ips = find_hosts(9123)
-        logging.info(pretty_json(elgato_ips))
-        elgato.discover(detectedLights, elgato_ips)
-    if bridgeConfig["config"]["govee"]["enabled"]:
-        govee.discover(detectedLights)
+    results = {}
+    for protocol in PROTOCOLS:
+        try:
+            enabled = protocol.is_enabled(bridgeConfig["config"])
+        except Exception as e:
+            logging.exception(f"Cannot evaluate whether {protocol.name} is enabled")
+            results[protocol.name] = {"state": "error", "error": f"{type(e).__name__}: {e}"}
+            continue
+        if not enabled:
+            results[protocol.name] = {"state": "disabled"}
+            continue
+
+        before = len(detectedLights)
+        results[protocol.name] = {"state": "running"}
+        statusRegistry.update("scan", protocols=dict(results))
+        statusRegistry.event("protocol_started", protocol=protocol.name)
+        try:
+            protocol.run(detectedLights, device_ips)
+        except Exception as e:
+            message = f"{type(e).__name__}: {e}"
+            logging.exception(f"Discovery failed for {protocol.name}")
+            results[protocol.name] = {"state": "error", "error": message}
+            statusRegistry.event("protocol_error", protocol=protocol.name, error=message)
+        else:
+            found = len(detectedLights) - before
+            results[protocol.name] = {"state": "ok", "found": found}
+            statusRegistry.event("protocol_ok", protocol=protocol.name, found=found)
+        statusRegistry.update("scan", protocols=dict(results))
+    return results
 
 def scanForLights() -> Dict:  # scan for ESP8266 lights and strips
     """
@@ -280,11 +374,37 @@ def scanForLights() -> Dict:  # scan for ESP8266 lights and strips
     bridgeConfig["temp"]["scanResult"] = {"lastscan": "active"}
     bridgeConfig["config"]["zigbee_device_discovery_info"]["status"] = "active"
     discoveryEvent()
+    statusRegistry.update("scan", state="active", started=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                          protocols={}, sweep=None, found=[], error=None)
+    statusRegistry.event("scan_started")
     detectedLights = []
-    device_ips = get_device_ips()
-    logging.info(f"Scanning for lights on\n{pretty_json(device_ips)}")
-    discover_lights(detectedLights, device_ips)
-    bridgeConfig["temp"]["scanResult"]["lastscan"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    newLights = []
+    try:
+        device_ips = get_device_ips()
+        logging.info(f"Scanning for lights on\n{pretty_json(device_ips)}")
+        discover_lights(detectedLights, device_ips)
+        newLights = _register_detected_lights(detectedLights)
+    except Exception as e:
+        message = f"{type(e).__name__}: {e}"
+        logging.exception("Light scan failed")
+        statusRegistry.update("scan", error=message)
+    finally:
+        # These drive the "searching" indicator in both web interfaces; leaving
+        # them on "active" makes a failed scan look like it never finished.
+        bridgeConfig["temp"]["scanResult"]["lastscan"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        bridgeConfig["config"]["zigbee_device_discovery_info"]["status"] = "ready"
+        discoveryEvent()
+        statusRegistry.update("scan", state="idle",
+                              lastscan=bridgeConfig["temp"]["scanResult"]["lastscan"],
+                              found=newLights)
+        statusRegistry.event("scan_finished", found=len(newLights),
+                             detected=len(detectedLights))
+    return bridgeConfig["temp"]["scanResult"]
+
+
+def _register_detected_lights(detectedLights: List[Dict]) -> List[Dict]:
+    """Add newly detected lights to the bridge, refreshing the ones we know."""
+    newLights = []
     for light in detectedLights:
         lightIsNew = True
         for lightObj in bridgeConfig["lights"].values():
@@ -292,10 +412,20 @@ def scanForLights() -> Dict:  # scan for ESP8266 lights and strips
                 update_light_ip(lightObj, light)
                 lightIsNew = False
                 break
-        if lightIsNew:
-            logging.info(f"Add new light {light['name']}")
-            lightId = addNewLight(light["modelid"], light["name"], light["protocol"], light["protocol_cfg"])
-            bridgeConfig["temp"]["scanResult"][lightId] = {"name": light["name"]}
-    bridgeConfig["config"]["zigbee_device_discovery_info"]["status"] = "ready"
-    discoveryEvent()
-    return bridgeConfig["temp"]["scanResult"]
+        if not lightIsNew:
+            continue
+        logging.info(f"Add new light {light['name']}")
+        lightId = addNewLight(light["modelid"], light["name"], light["protocol"], light["protocol_cfg"])
+        if not lightId:
+            # addNewLight returns False for a model id we have no template for;
+            # storing that would put a `False` key into the scan result.
+            logging.warning(f"Unknown model id {light['modelid']} for {light['name']}, ignoring")
+            statusRegistry.event("light_error", name=light["name"], protocol=light["protocol"],
+                                 error=f"unknown model id {light['modelid']}")
+            continue
+        bridgeConfig["temp"]["scanResult"][lightId] = {"name": light["name"]}
+        entry = {"id": lightId, "name": light["name"], "protocol": light["protocol"],
+                 "modelid": light["modelid"]}
+        newLights.append(entry)
+        statusRegistry.event("light_found", **entry)
+    return newLights

@@ -22,6 +22,9 @@ def on_mdns_discover(zeroconf, service_type, name, state_change):
 def discover(detectedLights, elgato_ips):
     mdns_string = "_elgo._tcp.local."
     logging.info('<Elgato> mDNS discovery for ' + mdns_string + ' started')
+    # The mDNS callback appends to a module-global; without clearing it every
+    # rescan re-reports every device found by earlier scans.
+    discovered_lights.clear()
     ip_version = IPVersion.V4Only
     zeroconf = Zeroconf(ip_version=ip_version)
     ServiceBrowser(zeroconf, mdns_string, handlers=[on_mdns_discover])

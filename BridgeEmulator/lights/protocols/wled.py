@@ -26,6 +26,9 @@ def on_mdns_discover(zeroconf, service_type, name, state_change):
 
 def discover(detectedLights, device_ips):
     logging.info('<WLED> discovery started')
+    # The mDNS callback appends to a module-global; without clearing it every
+    # rescan re-reports (and re-adds) every device found by earlier scans.
+    discovered_lights.clear()
     ip_version = IPVersion.V4Only
     zeroconf = Zeroconf(ip_version=ip_version)
     services = "_http._tcp.local."
