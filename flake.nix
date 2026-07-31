@@ -28,6 +28,9 @@
       };
 
       checks = forAllSystems (pkgs: {
+        unitTests = pkgs.callPackage ./nix/unitTests.nix {
+          diyhuePackage = self.packages.${pkgs.system}.diyhue;
+        };
         vmTest = pkgs.callPackage ./nix/vmTest.nix {
           diyhueModule = self.nixosModules.diyhue;
           diyhuePackage = self.packages.${pkgs.system}.diyhue;
@@ -42,6 +45,7 @@
         default = pkgs.mkShell {
           packages = [
             (self.packages.${pkgs.system}.diyhue.passthru.pythonEnv)
+            pkgs.python3Packages.pytest
             pkgs.openssl
             pkgs.libfaketime
           ];

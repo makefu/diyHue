@@ -145,12 +145,6 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)'
       --replace-fail '/opt/hue-emulator/openssl.conf' "$out/share/diyhue/openssl.conf" \
       --replace-fail 'private.key' '$config/private.key' \
       --replace-fail 'public.crt' '$config/public.crt'
-
-    # ---- logManager/logger.py: allow overriding log file path so check phases
-    # (which run with cwd=/) don't crash trying to open ./diyhue.log. ----
-    substituteInPlace BridgeEmulator/logManager/logger.py \
-      --replace-fail "filename='diyhue.log'" \
-        "filename=__import__('os').environ.get('DIYHUE_LOG_FILE', 'diyhue.log')"
   '';
 
   installPhase = ''
