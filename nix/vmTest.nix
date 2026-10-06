@@ -268,6 +268,13 @@ pkgs.testers.nixosTest {
     assert 'href="/status/"' in app_shell, (
         f"the app shell must link to the status page: {app_shell[-400:]}")
 
+    # === Jinja pages served by this repo (not the SPA zip) ===
+    # /devices, page-403 and page-500 extend layouts/*.html, which upstream
+    # deleted while leaving these templates behind; a missing layout turns
+    # /devices into a 500.
+    devices_page = bridge.succeed("curl -fsS -b /tmp/cj http://localhost/devices")
+    assert "Supported Devices" in devices_page, devices_page[:200]
+
     # === Integrations toggle without restarting the service ===
     started_at = bridge.succeed(
         "systemctl show diyhue -p ExecMainStartTimestamp --value"

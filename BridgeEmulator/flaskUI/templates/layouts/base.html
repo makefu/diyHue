@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}DiyHue{% endblock title %}</title>
+    <link rel="icon" href="/assets/images/favicon.ico">
+    <link rel="stylesheet" href="/assets/fontawesome-free-5.15.1-web/css/all.min.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato&display=swap">
+    <style>
+      body { margin: 0; font-family: "Open Sans", "Lato", sans-serif; background: #eef1f5; color: #333; }
+      .topbar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: #fff; border-bottom: 1px solid #ddd; }
+      .topbar .logo { height: 28px; }
+      .topbar a { margin-left: auto; color: #3974b4; text-decoration: none; }
+      main { display: block; padding: 20px; max-width: 1100px; margin: 0 auto; }
+      .bgc-white { background: #fff; }
+      .p-20 { padding: 20px; }
+      .bd { border: 1px solid #ddd; border-radius: 6px; }
+      .c-grey-900 { color: #222; margin-top: 0; }
+      .mT-30 { margin-top: 30px; }
+      .row { display: flex; flex-wrap: wrap; }
+      [class*="col-sm-"] { padding: 0 10px; box-sizing: border-box; }
+      .col-sm-2 { width: 16.6%; }
+      .col-sm-3 { width: 25%; }
+      .col-sm-4 { width: 33.3%; }
+      .col-sm-10 { width: 83.3%; }
+      .form-group { margin-bottom: 15px; }
+      .form-control { width: 100%; padding: 8px 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; background: #fff; }
+      .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+      .btn-primary { background: #3974b4; color: #fff; }
+    </style>
+    {% block stylesheets %}{% endblock stylesheets %}
+  </head>
+  <body>
+    <header class="topbar">
+      <img class="logo" src="/assets/images/logo.svg" alt="">
+      <span>DiyHue</span>
+      <a href="/">Back to the app</a>
+    </header>
+    <main>
+      {% block content %}{% endblock content %}
+    </main>
+    {% block javascripts %}{% endblock javascripts %}
+  </body>
+</html>

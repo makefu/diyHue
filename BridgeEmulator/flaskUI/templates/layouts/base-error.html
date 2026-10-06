@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}DiyHue{% endblock title %}</title>
+    <link rel="icon" href="/assets/images/favicon.ico">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato&display=swap">
+    <style>
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; font-family: "Open Sans", "Lato", sans-serif; background: url(/assets/images/login_dark_blur.webp) no-repeat center bottom; background-size: cover; background-attachment: fixed; color: #333; }
+      /* atomic utility classes used by the page-403/500 templates (were
+         provided by the deleted adminator theme's style.css) */
+      .pos-a { position: absolute; }
+      .pos-r { position: relative; }
+      .t-0 { top: 0; }
+      .l-0 { left: 0; }
+      .w-100 { width: 100%; }
+      .h-100 { height: 100%; }
+      .d-f { display: flex; }
+      .fxd-r { flex-direction: row; }
+      .fxd-c { flex-direction: column; }
+      .fxw-w { flex-wrap: wrap; }
+      .ai-c { align-items: center; }
+      .jc-c { justify-content: center; }
+      .bgc-white { background: #fff; }
+      .p-30 { padding: 30px; }
+      .mR-60 { margin-right: 60px; }
+      .mB-10 { margin-bottom: 10px; }
+      .mB-30 { margin-bottom: 30px; }
+      .fw-900 { font-weight: 900; }
+      .lh-1 { line-height: 1; }
+      .fsz-lg { font-size: 22px; }
+      .fsz-def { font-size: 15px; }
+      .tt-c { text-transform: capitalize; }
+      .c-red-500 { color: #fa424a; }
+      .c-grey-900 { color: #222; }
+      .c-grey-700 { color: #555; }
+      .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; text-decoration: none; }
+      .btn-primary { background: #3974b4; color: #fff; }
+      h1, h3, p { margin: 0 0 10px; }
+    </style>
+    {% block stylesheets %}{% endblock stylesheets %}
+  </head>
+  <body>
+    {% block content %}{% endblock content %}
+    {% block javascripts %}{% endblock javascripts %}
+  </body>
+</html>
