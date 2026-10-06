@@ -4,10 +4,10 @@ from HueObjects import Group, EntertainmentConfiguration, Scene, BehaviorInstanc
 import uuid
 import json
 import weakref
-from subprocess import Popen
 from flask_restful import Resource
 from flask import request
 from services.entertainment import entertainmentService
+from services.updateManager import bridge_software_version
 from threading import Thread
 from time import sleep
 from functions.core import nextFreeId
@@ -199,7 +199,7 @@ def v2BridgeDevice():
         "model_id": "BSB002",
         "product_archetype": "bridge_v2",
         "product_name": "Philips hue",
-        "software_version": config["apiversion"][:5] + config["swversion"]
+        "software_version": bridge_software_version(config["apiversion"], config["swversion"])
     }
     result["services"] = [
         {"rid": str(uuid.uuid5(uuid.NAMESPACE_URL, bridge_id + 'bridge')), "rtype": "bridge"},
@@ -460,6 +460,7 @@ class ClipV2Resource(Resource):
             objCreation.update(postDict)
             newObject = Scene.Scene(objCreation)
             bridgeConfig["scenes"][new_object_id] = newObject
+            configManager.bridgeConfig.mark_dirty("scenes")
             if "actions" in postDict:
                 for action in postDict["actions"]:
                     if "target" in action:
@@ -483,6 +484,9 @@ class ClipV2Resource(Resource):
                             if "gradient" in scene:
                                 sceneState["gradient"] = scene["gradient"]
                             newObject.lightstates[lightObj] = sceneState
+            # Persist immediately so the scene survives a bridge restart.
+            # The v1 REST API always saved after scene writes; the v2 path was missing this.
+            configManager.bridgeConfig.save_config(backup=False, resource="scenes")
         elif resource == "smart_scene":
             new_object_id = nextFreeId(bridgeConfig, "smart_scene")
             objCreation = {
@@ -497,9 +501,13 @@ class ClipV2Resource(Resource):
             objCreation.update(postDict)
             newObject = SmartScene.SmartScene(objCreation)
             bridgeConfig["smart_scene"][new_object_id] = newObject
+            configManager.bridgeConfig.mark_dirty("smart_scene")
         elif resource == "behavior_instance":
             newObject = BehaviorInstance.BehaviorInstance(postDict)
             bridgeConfig["behavior_instance"][newObject.id_v2] = newObject
+            # Persist immediately — behavior instances define which switch buttons do what.
+            # Without this save they are lost on restart, breaking all physical controls.
+            configManager.bridgeConfig.save_config(backup=False, resource="behavior_instance")
         elif resource == "entertainment_configuration":
             new_object_id = nextFreeId(bridgeConfig, "groups")
             objCreation = {
@@ -516,6 +524,13 @@ class ClipV2Resource(Resource):
                         newObject.add_light(obj)
                         newObject.locations[obj] = element["positions"]
             bridgeConfig["groups"][new_object_id] = newObject
+            configManager.bridgeConfig.mark_dirty("groups")
+            # Fire update so clients see lights/channels added after constructor's initial empty event
+            streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             "data": [newObject.getV2Api()],
+                             "id": str(uuid.uuid4()),
+                             "type": "update"}
+            StreamEvent(streamMessage)
         elif resource in ["room", "zone"]:
             new_object_id = nextFreeId(bridgeConfig, "groups")
             objCreation = {
@@ -535,6 +550,7 @@ class ClipV2Resource(Resource):
                     newObject.add_light(obj)
 
             bridgeConfig["groups"][new_object_id] = newObject
+            configManager.bridgeConfig.mark_dirty("groups")
         elif resource == 'geofence_client':
             new_object_id = nextFreeId(bridgeConfig, "geofence_clients")
             objCreation = {
@@ -545,6 +561,7 @@ class ClipV2Resource(Resource):
             }
             newObject = GeofenceClient.GeofenceClient(objCreation)
             bridgeConfig["geofence_clients"][new_object_id] = newObject
+            # NOTE: geofence_clients is memory-only — no backing YAML file, no save() method
         else:
             return {
                 "errors": [{
@@ -618,18 +635,19 @@ class ClipV2ResourceId(Resource):
         elif resource == "entertainment_configuration":
             if "action" in putDict:
                 if putDict["action"] == "start":
-                    logging.info("start hue entertainment")
-                    Thread(target=entertainmentService, args=[
-                           object, authorisation["user"]]).start()
-                    for light in object.lights:
-                        light().update_attr({"state": {"mode": "streaming"}})
-                    object.update_attr({"stream": {"active": True, "owner": authorisation["user"].username, "proxymode": "auto", "proxynode": "/bridge"}})
-                    sleep(1)
+                    if not object.stream["active"]:
+                        logging.info("start hue entertainment")
+                        object.update_attr({"stream": {"active": True, "owner": authorisation["user"].username, "proxymode": "auto", "proxynode": "/bridge"}})
+                        Thread(target=entertainmentService, args=[
+                               object, authorisation["user"]]).start()
+                        sleep(1)
                 elif putDict["action"] == "stop":
                     logging.info("stop entertainment")
-                    for light in object.lights:
-                        light().update_attr({"state": {"mode": "homeautomation"}})
-                    Popen(["killall", "openssl"])
+                    # active False ends the worker even if _proc is not stored yet.
+                    # The worker releases streaming mode and restores the lights.
+                    proc = object.stream.get("_proc")
+                    if proc:
+                        proc.kill()
                     object.update_attr({"stream": {"active": False}})
         elif resource == "scene":
             if "recall" in putDict:
@@ -640,6 +658,7 @@ class ClipV2ResourceId(Resource):
                 object.palette = putDict["palette"]
             if "metadata" in putDict:
                 object.name = putDict["metadata"]["name"]
+                configManager.bridgeConfig.mark_dirty("scenes")
         elif resource == "smart_scene":
             if "recall" in putDict and "action" in putDict["recall"]:
                 object.activate(putDict)
@@ -650,17 +669,22 @@ class ClipV2ResourceId(Resource):
                     object.timeslots = putDict["week_timeslots"][0]["timeslots"]
                 if "recurrence" in putDict["week_timeslots"][0]:
                     object.recurrence = putDict["week_timeslots"][0]["recurrence"]
+                configManager.bridgeConfig.mark_dirty("smart_scene")
             if "metadata" in putDict:
                 object.name = putDict["metadata"]["name"]
+                configManager.bridgeConfig.mark_dirty("smart_scene")
         elif resource == "grouped_light":
             object.setV2Action(putDict)
         elif resource == "geolocation":
             bridgeConfig["sensors"]["1"].protocol_cfg = {
                 "lat": putDict["latitude"], "long": putDict["longitude"]}
             bridgeConfig["sensors"]["1"].config["configured"] = True
+            configManager.bridgeConfig.mark_dirty("sensors")
             daylightSensor(bridgeConfig["config"]["timezone"], bridgeConfig["sensors"]["1"])
         elif resource == "behavior_instance":
             object.update_attr(putDict)
+            # Keep the on-disk config in sync so edits survive a bridge restart.
+            configManager.bridgeConfig.save_config(backup=False, resource="behavior_instance")
         elif resource in ["room", "zone"]:
             v1Api = {}
             if "metadata" in putDict:
@@ -669,11 +693,39 @@ class ClipV2ResourceId(Resource):
                 if "archetype" in putDict["metadata"]:
                     v1Api["icon_class"] = putDict["metadata"]["archetype"].replace("_", " ").capitalize()
             if "children" in putDict:
-                for children in putDict["children"]:
-                    obj = getObject(
-                        children["rtype"], children["rid"])
-                    object.add_light(obj)
+                light_ids = set(bridgeConfig["lights"].keys())
+                new_light_map = {}
+                new_device_children = []
+                for child in putDict["children"]:
+                    obj = getObject(child["rtype"], child["rid"])
+                    if obj and any(obj is bridgeConfig["lights"][k] for k in light_ids):
+                        new_light_map[child["rid"]] = obj
+                    elif child["rtype"] == "device":
+                        new_device_children.append(child["rid"])
+                # Remove lights no longer in the new children list, deduplicate
+                seen_ids = set()
+                deduped = []
+                for ref in object.lights:
+                    if ref():
+                        dev_info = ref().getDevice()
+                        if dev_info and dev_info["id"] in new_light_map and dev_info["id"] not in seen_ids:
+                            seen_ids.add(dev_info["id"])
+                            deduped.append(ref)
+                object.lights = deduped
+                # Add only lights not already present
+                existing_device_ids = set()
+                for ref in object.lights:
+                    if ref():
+                        dev_info = ref().getDevice()
+                        if dev_info:
+                            existing_device_ids.add(dev_info["id"])
+                for rid, obj in new_light_map.items():
+                    if rid not in existing_device_ids:
+                        object.add_light(obj)
+                # Replace non-light device children (switches, sensors) wholesale
+                object.device_children = new_device_children
             object.update_attr(v1Api)
+            configManager.bridgeConfig.mark_dirty("groups")
         elif resource == 'geofence_client':
             attrs = {}
             if "name" in putDict:
@@ -685,6 +737,7 @@ class ClipV2ResourceId(Resource):
         elif resource == "zigbee_device_discovery":
             if putDict["action"]["action_type"] == "search":
                 bridgeConfig["config"]["zigbee_device_discovery_info"]["status"] = "active"
+                configManager.bridgeConfig.mark_dirty("config")
                 Thread(target=scanForLights).start()
         elif resource == "device":
             if "identify" in putDict and putDict["identify"]["action"] == "identify":
@@ -693,8 +746,10 @@ class ClipV2ResourceId(Resource):
                 if "name" in putDict["metadata"]:
                     if object:
                         object.name = putDict["metadata"]["name"]
+                        configManager.bridgeConfig.mark_dirty("lights")
                     elif resourceid == v2BridgeDevice()["id"]:
                         bridgeConfig["config"]["name"] = putDict["metadata"]["name"]
+                        configManager.bridgeConfig.mark_dirty("config")
                         streamMessage = {"creationtime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                         "data": [{
                                             "id": resourceid,
@@ -707,10 +762,10 @@ class ClipV2ResourceId(Resource):
                                         "type": "update"
                                         }
                         StreamEvent(streamMessage)
-                    configManager.bridgeConfig.save_config(backup=False, resource="config")
         elif resource == "motion":
             if "enabled" in putDict:
                 object.update_attr({"config": {"on": putDict["enabled"]}})
+                configManager.bridgeConfig.mark_dirty("sensors")
         else:
             return {
                 "errors": [{
@@ -733,10 +788,24 @@ class ClipV2ResourceId(Resource):
         object = getObject(resource, resourceid)
 
         if hasattr(object, 'getObjectPath'):
-            del bridgeConfig[object.getObjectPath()["resource"]
-                             ][object.getObjectPath()["id"]]
+            # getObjectPath returns V1 resource names (e.g. "lights", "groups")
+            # which map directly to CONFIG_FILES keys
+            v1_resource = object.getObjectPath()["resource"]
+            del bridgeConfig[v1_resource][object.getObjectPath()["id"]]
+            configManager.bridgeConfig.mark_dirty(v1_resource)
         else:
+            # V2 resource type (e.g. "room", "smart_scene") — map to V1 key
             del bridgeConfig[resource][resourceid]
+            yaml_resource = configManager.configHandler.Config.V2_TO_V1_RESOURCE.get(resource)
+            if yaml_resource:
+                configManager.bridgeConfig.mark_dirty(yaml_resource)
+
+        # Persist deletions immediately for resources whose in-memory state must
+        # survive a bridge restart (scenes, behavior instances).
+        if resource == "behavior_instance":
+            configManager.bridgeConfig.save_config(backup=False, resource="behavior_instance")
+        elif resource == "scene":
+            configManager.bridgeConfig.save_config(backup=False, resource="scenes")
 
         response = {"data": [{
             "rid": resourceid,

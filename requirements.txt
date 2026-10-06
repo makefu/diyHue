@@ -16,5 +16,5 @@ flask_cors
 flask-sock
 yeelight
 python-kasa==0.4.1
-bleak
+bleak>=0.21
 rgbxy

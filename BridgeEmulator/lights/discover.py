@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Tuple, Union, Generator
-from lights.protocols import tpkasa, wled, mqtt, hyperion, yeelight, hue, deconz, native_multi, tasmota, shelly, esphome, tradfri, elgato, govee
+from lights.protocols import tpkasa, wled, mqtt, hyperion, yeelight, hue, hue_bl, deconz, native_multi, tasmota, shelly, esphome, tradfri, elgato, govee
 from services import homeAssistantWS, statusRegistry
 from HueObjects import Light, StreamEvent
 from functions.core import nextFreeId
@@ -136,7 +136,7 @@ def addNewLight(modelid: str, name: str, protocol: str, protocol_cfg: Dict) -> U
         rooms = [obj.id_v2 for obj in bridgeConfig["groups"].values()]
         lights = [obj.id_v2 for obj in bridgeConfig["lights"].values()]
         bridgeConfig["groups"]["0"].groupZeroStream(rooms, lights)
-        configManager.bridgeConfig.save_config(backup=False, resource="lights")
+        configManager.bridgeConfig.mark_dirty("lights")
         return newLightID
     return False
 
@@ -224,7 +224,7 @@ def is_light_matching(lightObj: Light.Light, light: Dict) -> bool:
         return lightObj.protocol_cfg["id"] == light["protocol_cfg"]["id"] and lightObj.modelid == light["modelid"]
     if protocol in ["shelly", "native", "native_single", "esphome", "elgato"]:
         return lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and lightObj.modelid == light["modelid"]
-    if protocol in ["hue", "deconz"]:
+    if protocol in ["hue", "hue_bl", "deconz"]:
         return lightObj.protocol_cfg["uniqueid"] == light["protocol_cfg"]["uniqueid"] and lightObj.modelid == light["modelid"]
     if protocol == "wled":
         return (lightObj.protocol_cfg["mac"] == light["protocol_cfg"]["mac"] and
@@ -313,6 +313,8 @@ PROTOCOLS = [
                       _enabled_flag("wled")),
     DiscoveryProtocol("hue", lambda detected, ips: hue.discover(detected, bridgeConfig["config"]["hue"]),
                       _configured("hue"), toggleable=False),
+    DiscoveryProtocol("hue_bl", lambda detected, ips: hue_bl.discover(detected),
+                      _enabled_flag("hue_bl")),
     DiscoveryProtocol("shelly", lambda detected, ips: shelly.discover(detected, ips),
                       _enabled_flag("shelly")),
     DiscoveryProtocol("esphome", lambda detected, ips: esphome.discover(detected, ips),
