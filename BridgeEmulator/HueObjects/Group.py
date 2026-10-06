@@ -141,7 +141,10 @@ class Group():
             if light():
                 if "on" in light().state and light().state["on"]:
                     any_on = True
-                    if "bri" in light().state:
+                    # on/off-only entities (HA switches exposed as plugs)
+                    # carry no brightness; a missing or null bri must not
+                    # count towards the average.
+                    if light().state.get("bri") is not None:
                         bri = bri + light().state["bri"]
                         lights_on = lights_on + 1
                 else:

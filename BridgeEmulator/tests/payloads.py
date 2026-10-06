@@ -91,6 +91,21 @@ SENSOR = {
     "attributes": {"friendly_name": "Arbeitszimmer Temperature"},
 }
 
+# light.arbeitszimmer_licht - a dimmer whose brightness attribute came back
+# null from Home Assistant. Storing it as bri=None turned every group state
+# aggregation into a TypeError.
+DIMMER_ON_NULL_BRIGHTNESS = {
+    "entity_id": "light.arbeitszimmer_licht",
+    "state": "on",
+    "attributes": {
+        "supported_color_modes": ["brightness"],
+        "color_mode": "brightness",
+        "brightness": None,
+        "friendly_name": "Arbeitszimmer Licht",
+        "supported_features": 32,
+    },
+}
+
 
 def tagged(payload, flag):
     """Return a copy of ``payload`` carrying the ``diyhue`` include/exclude flag."""

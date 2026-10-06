@@ -66,7 +66,9 @@ def translate_homeassistant_state_to_diyhue_state(existing_diy_hue_state, ha_sta
         return diyhue_state
 
     attributes = ha_state.get('attributes', {})
-    if "brightness" in attributes:
+    # HA reports brightness: null for entities it cannot poll; storing that
+    # None poisoned group bri aggregation (TypeError on sum).
+    if attributes.get("brightness") is not None:
         diyhue_state['bri'] = attributes["brightness"]
 
     # Prefer kelvin: the outbound path sends color_temp_kelvin, and plain

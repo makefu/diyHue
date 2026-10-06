@@ -317,6 +317,13 @@ class TestStateTranslation:
         assert result["colormode"] == "ct"
         assert result["ct"] == pytest.approx(1000000 / 3000, abs=1)
 
+    def test_null_brightness_is_not_stored(self):
+        """HA can report brightness: null; bri=None broke group aggregation."""
+        result = ha_protocol.translate_homeassistant_state_to_diyhue_state(
+            {"on": False, "bri": 100, "reachable": True}, payloads.DIMMER_ON_NULL_BRIGHTNESS)
+        assert result["on"] is True
+        assert result.get("bri") is not None
+
     def test_missing_entity_is_reported_unreachable(self):
         """latest_states lookups used to KeyError when an entity vanished from HA."""
         class FakeLight:
